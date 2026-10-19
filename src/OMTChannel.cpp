@@ -1070,23 +1070,24 @@ void Channel::processMetadata(const std::string& xml) {
         return;
     }
     
-    // Tally commands
-    if (xml == MetadataConstants::TALLY_PREVIEWPROGRAM) {
+    // Tally commands. Official receivers emit the legacy Program== typo'd
+    // tokens (see MetadataConstants); both forms are accepted.
+    if (xml == MetadataConstants::TALLY_PREVIEWPROGRAM || xml == MetadataConstants::TALLY_PREVIEWPROGRAM_LEGACY) {
         tallyPreview_ = true; tallyProgram_ = true;
         if (listener_) listener_->onTallyChanged(this);
         return;
     }
-    if (xml == MetadataConstants::TALLY_PROGRAM) {
+    if (xml == MetadataConstants::TALLY_PROGRAM || xml == MetadataConstants::TALLY_PROGRAM_LEGACY) {
         tallyPreview_ = false; tallyProgram_ = true;
         if (listener_) listener_->onTallyChanged(this);
         return;
     }
-    if (xml == MetadataConstants::TALLY_PREVIEW) {
+    if (xml == MetadataConstants::TALLY_PREVIEW || xml == MetadataConstants::TALLY_PREVIEW_LEGACY) {
         tallyPreview_ = true; tallyProgram_ = false;
         if (listener_) listener_->onTallyChanged(this);
         return;
     }
-    if (xml == MetadataConstants::TALLY_NONE) {
+    if (xml == MetadataConstants::TALLY_NONE || xml == MetadataConstants::TALLY_NONE_LEGACY) {
         tallyPreview_ = false; tallyProgram_ = false;
         if (listener_) listener_->onTallyChanged(this);
         return;

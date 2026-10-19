@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Options
 option(BUILD_SHARED_LIBS "Build shared library" ON)
 option(LIBOMTCPP_BUILD_EXAMPLES "Build example programs" OFF)
+option(LIBOMTCPP_BUILD_TESTS "Build loopback wire tests (requires -DBUILD_SHARED_LIBS=OFF and VMX_ROOT)" OFF)
 
 # VMX Codec dependency (external)
 # Usage: cmake -DVMX_ROOT=/path/to/libvmx ..
@@ -95,4 +96,10 @@ install(FILES include/libomt.h
 # Examples
 if(LIBOMTCPP_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# Tests
+if(LIBOMTCPP_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

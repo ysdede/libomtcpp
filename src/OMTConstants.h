@@ -54,10 +54,25 @@ namespace MetadataConstants {
     constexpr const char* CHANNEL_PREVIEW_VIDEO_OFF = "<OMTSettings Preview=\"false\" />";
     
     // Tally commands
+    //
+    // NB: There is a double == typo in the legacy tally tokens below that must be
+    // kept for wire compatibility (libomtnet 139d799, PROTOCOL.md). Metadata
+    // commands are matched as exact strings, not parsed as XML, and every
+    // official receiver (libomtnet, vMix, ...) emits the typo'd Program== form.
+    // libomtnet briefly shipped well-formed tokens plus legacy matching
+    // (PR #54, f8e68a6) and reverted it the next day (12f0b2f) — the legacy
+    // token remains authoritative. A future Receiver implementation here must
+    // therefore SEND the *_LEGACY form, and the parse side accepts both.
     constexpr const char* TALLY_PREVIEW = "<OMTTally Preview=\"true\" Program=\"false\" />";
     constexpr const char* TALLY_PROGRAM = "<OMTTally Preview=\"false\" Program=\"true\" />";
     constexpr const char* TALLY_PREVIEWPROGRAM = "<OMTTally Preview=\"true\" Program=\"true\" />";
     constexpr const char* TALLY_NONE = "<OMTTally Preview=\"false\" Program=\"false\" />";
+
+    // Legacy tally commands as actually emitted by official receivers.
+    constexpr const char* TALLY_PREVIEW_LEGACY = "<OMTTally Preview=\"true\" Program==\"false\" />";
+    constexpr const char* TALLY_PROGRAM_LEGACY = "<OMTTally Preview=\"false\" Program==\"true\" />";
+    constexpr const char* TALLY_PREVIEWPROGRAM_LEGACY = "<OMTTally Preview=\"true\" Program==\"true\" />";
+    constexpr const char* TALLY_NONE_LEGACY = "<OMTTally Preview=\"false\" Program==\"false\" />";
     
     // Quality suggestion prefix
     constexpr const char* SUGGESTED_QUALITY_PREFIX = "<OMTSettings Quality=";
