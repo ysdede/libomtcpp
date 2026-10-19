@@ -555,6 +555,27 @@ extern "C" {
     */
 
     /**
+    * Callback that receives every log line the library produces.
+    *
+    * line is a NUL-terminated UTF-8 message valid only for the duration of the
+    * call. userData is passed through unchanged. The callback is invoked from
+    * arbitrary OMT threads and is serialized by an internal lock: it never runs
+    * concurrently with itself, but it MUST NOT call back into OMT functions.
+    */
+    typedef void (*omt_log_callback_t)(const char* line, void* userData);
+
+    /**
+    * Install a callback that intercepts all log lines, or pass null to remove
+    * it and restore the default sink (logcat on Android, stderr elsewhere).
+    *
+    * While a callback is installed it is the only sink: nothing is printed to
+    * the default sink.
+    *
+    * Port of libomtnet's OMTLogging.SetCallback (upstream ca95e4c).
+    */
+    void omt_setlogcallback(omt_log_callback_t callback, void* userData);
+
+    /**
     * Specify a log file filename, including the full path, or null to disable.
     * 
     * If this function is not called, a log file is created in the ~/.OMT/logs folder for this process on Mac and Linux, C:\ProgramData\OMT\logs on Windows.

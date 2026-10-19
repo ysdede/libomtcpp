@@ -30,6 +30,7 @@ set(LIBOMTCPP_HEADERS
     src/OMTChannel.h
     src/OMTConstants.h
     src/OMTDiscovery.h
+    src/OMTLogging.h
     src/OMTProtocol.h
     src/OMTSender.h
 )

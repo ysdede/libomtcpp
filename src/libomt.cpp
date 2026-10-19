@@ -11,23 +11,10 @@
 #include "OMTSender.h"
 #include "OMTDiscovery.h"
 #include "OMTConstants.h"
+#include "OMTLogging.h"
 
 #include <cstring>
 #include <cstdio>
-
-// Cross-platform logging
-#if defined(__ANDROID__)
-#include <android/log.h>
-#define LOG_TAG "libomt"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#elif defined(OMT_DEBUG_LOG)
-#define LOGI(...) do { fprintf(stdout, "[libomt] "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); } while(0)
-#define LOGE(...) do { fprintf(stderr, "[libomt ERROR] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
-#else
-#define LOGI(...)
-#define LOGE(...)
-#endif
 
 // Static storage for discovery addresses (returned to caller)
 static std::vector<char*> s_discoveryAddresses;
@@ -256,6 +243,10 @@ void omt_send_getaudiostatistics(omt_send_t* instance, OMTStatistics* stats) {
 // =============================================================
 // Settings API (stubs)
 // =============================================================
+
+void omt_setlogcallback(omt_log_callback_t callback, void* userData) {
+    omt::logging::setCallback(callback, userData);
+}
 
 void omt_setloggingfilename(const char* filename) {}
 int omt_settings_get_string(const char* name, char* value, int maxLength) { return 0; }
