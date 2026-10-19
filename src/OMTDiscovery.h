@@ -69,6 +69,18 @@ class Discovery {
 public:
     // Singleton access
     static Discovery& getInstance();
+
+    /**
+     * Stop and release the shared singleton.
+     *
+     * Called by omt_shutdown() once every sender and receiver is destroyed.
+     * Safe to call repeatedly; the singleton is recreated on demand by a later
+     * getInstance(), so OMT can be used again afterwards. Callers must not use
+     * OMT concurrently while shutting down.
+     *
+     * Port of libomtnet's OMTLogging.Shutdown / omt_shutdown (upstream bda284e).
+     */
+    static void shutdown();
     
     // Non-copyable
     Discovery(const Discovery&) = delete;

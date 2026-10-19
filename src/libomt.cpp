@@ -255,6 +255,14 @@ int omt_settings_get_integer(const char* name) { return 0; }
 void omt_settings_set_integer(const char* name, int value) {}
 
 // =============================================================
+// Shutdown API
+// =============================================================
+
+void omt_shutdown() {
+    omt::Discovery::shutdown();
+}
+
+// =============================================================
 // Extended Statistics API
 // =============================================================
 

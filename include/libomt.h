@@ -627,6 +627,27 @@ extern "C" {
     */
     void omt_settings_set_integer(const char* name, int value);
 
+    /**
+    * =================================================
+    * Shutdown
+    * =================================================
+    */
+
+    /**
+    * Stop and release OMT's process-wide global resources (the discovery
+    * singleton), so a host application can tear OMT down deterministically —
+    * for example before unloading the library or at process exit.
+    *
+    * Destroy every sender and receiver created with this library before
+    * calling, and do not call any other OMT function concurrently.
+    *
+    * Safe to call more than once. OMT can be used again afterwards; global
+    * state is recreated on demand.
+    *
+    * Port of libomtnet's omt_shutdown (upstream bda284e).
+    */
+    void omt_shutdown(void);
+
 #ifdef __cplusplus
 }
 #endif

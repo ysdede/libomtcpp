@@ -27,6 +27,21 @@ Discovery& Discovery::getInstance() {
     return *s_instance;
 }
 
+void Discovery::shutdown() {
+    Discovery* toDelete = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_instanceMutex);
+        if (s_instance != nullptr) {
+            toDelete = s_instance;
+            s_instance = nullptr;
+        }
+    }
+    // Destroy outside the singleton lock: ~Discovery() runs stop() (which takes
+    // mutex_), and a concurrent getInstance() must not wait on a mutex held
+    // across the destructor of the object it is about to hand out.
+    delete toDelete;
+}
+
 Discovery::Discovery() {
     LOGI("Discovery: created");
 }
