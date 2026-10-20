@@ -34,4 +34,6 @@ function(omt_add_test name)
 endfunction()
 
 omt_add_test(test_tally)
+omt_add_test(test_socket_write)
 omt_add_test(test_sender_ports)
+set_tests_properties(test_socket_write PROPERTIES TIMEOUT 30)

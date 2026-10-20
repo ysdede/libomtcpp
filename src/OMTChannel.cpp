@@ -10,6 +10,8 @@
 #include <thread>
 #include <chrono>
 #include <string>
+#include <algorithm>
+#include <climits>
 #ifndef _WIN32
 #include <unistd.h>
 #include <fcntl.h>
@@ -22,6 +24,13 @@
 #endif
 
 #include "OMTLogging.h"
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
 
 namespace omt {
 
@@ -60,8 +69,8 @@ bool IsPeerGoneErrno(int e) {
     }
 }
 
-// Poll-driven non-blocking full send. Blocking semantics WITHOUT touching the
-// shared fd flags (no fcntl(F_SETFL) anywhere): POLLOUT readiness + MSG_DONTWAIT.
+// Bounded non-blocking full send. Blocking semantics WITHOUT touching the
+// shared fd flags: try send first, then wait for POLLOUT when progress stalls.
 //
 // `offset` is in/out: pass the frame's length as `length` and the position to
 // resume from in `offset`, and a Timeout leaves the number of bytes actually on
@@ -87,6 +96,7 @@ SendOutcome sendAllPoll(int fd, const uint8_t* data, size_t length,
         if (errOut) *errOut = err;
         return o;
     };
+
     // P0 #7 (Codex): bound the write. A peer that accepts the socket but never
     // reads keeps poll() returning 0 forever (alive stays true), so an unbounded
     // loop would hang the caller — and for the SYNC metadata path, the caller
@@ -95,24 +105,29 @@ SendOutcome sendAllPoll(int fd, const uint8_t* data, size_t length,
     // used to cause: tearing the channel down for a peer that is merely slow.
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMs);
+    bool waitForWritable = false;
     while (offset < length && alive.load() && !peerGone.load()) {
         if (std::chrono::steady_clock::now() >= deadline)
             return report(SendOutcome::Timeout, ETIMEDOUT);
-        struct pollfd pfd{fd, POLLOUT, 0};
-        const int pr = poll(&pfd, 1, 100);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            // poll() itself failing is not evidence about the peer. Keep the
-            // budget and let a real send() make the call.
-            continue;
+        // Try a non-blocking write first. Readiness polling is only useful
+        // after the socket has refused progress, not before every write.
+        if (waitForWritable) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            const int waitMs = static_cast<int>((std::max)(int64_t{1},
+                (std::min)(int64_t{100}, static_cast<int64_t>(remaining))));
+            struct pollfd pfd{fd, POLLOUT, 0};
+            const int pr = poll(&pfd, 1, waitMs);
+            if (pr <= 0) continue; // deadline and cancellation checked above
         }
-        if (pr == 0) continue;  // timeout — re-check alive + deadline
         // POLLERR / POLLHUP land here too: we still attempt the send, because the
         // send is what reports the kernel's actual verdict. A half-closed peer that
         // merely shows POLLHUP but still accepts bytes stays alive by design.
-        const ssize_t n = ::send(fd, data + offset, length - offset,
+        const ssize_t n = ::send(fd, reinterpret_cast<const char*>(data + offset),
+                                 static_cast<int>((std::min)(length - offset, static_cast<size_t>(INT_MAX))),
                                  MSG_NOSIGNAL | MSG_DONTWAIT);
-        if (n > 0) { offset += static_cast<size_t>(n); continue; }
+        if (n > 0) { offset += static_cast<size_t>(n); waitForWritable = false; continue; }
+        waitForWritable = true;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
             continue;
         const int err = (n == 0) ? EPIPE : errno;
@@ -168,6 +183,9 @@ Channel::Channel(int socketFd, struct sockaddr_in address,
     
     // TCP_NODELAY for low latency
     int one = 1;
+#ifdef SO_NOSIGPIPE
+    setsockopt(socketFd_, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
     setsockopt(socketFd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     
     // Set send buffer
