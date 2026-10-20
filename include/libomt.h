@@ -24,7 +24,7 @@
 */
 
 #pragma once
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(LIBOMTCPP_NO_AUTOLINK)
 #pragma comment(lib, "libomt.lib")
 #endif
 
@@ -447,6 +447,9 @@ extern "C" {
     * @param[in] quality Specify the quality to use for video encoding. If Default, this can be automatically adjusted based on Receiver requirements.
     */
     omt_send_t* omt_send_create(const char* name, OMTQuality quality);
+
+    /* Actual listening port for discovery/direct connections; zero for null. */
+    int omt_send_getport(omt_send_t* instance);
 
     /**
     * Optionally set information describing the sender.
