@@ -41,16 +41,6 @@ bool Sender::start() {
     std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
     if (running_.load()) return true;
     
-    const int ss = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (ss < 0) {
-        LOGE("Sender: failed to create socket errno=%d (%s)", errno, std::strerror(errno));
-        return false;
-    }
-    serverSocket_.store(ss);
-    
-    int one = 1;
-    setsockopt(ss, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     // Phase C: bind to the configured local IPv4. Empty / "0.0.0.0" / "auto"
@@ -63,48 +53,70 @@ bool Sender::start() {
     } else if (::inet_pton(AF_INET, bindAddr.c_str(), &addr.sin_addr) != 1) {
         LOGE("Sender: invalid bind address '%s' (errno=%d %s) — refusing to start",
              bindAddr.c_str(), errno, std::strerror(errno));
-        close(ss);
-        serverSocket_ = -1;
         return false;
     }
-    // P2 #8 (Codex): validate the port at the ACTUAL narrowing boundary — config_.port
-    // is an int fed to htons (uint16_t); out-of-range values wrap silently (65536->0,
-    // -1->65535) and bind the wrong port. Fail-closed, matching the bind-address guard.
-    if (config_.port < 1 || config_.port > 65535) {
-        LOGE("Sender: listen port %d out of range 1..65535 — refusing to start", config_.port);
-        close(ss);
-        serverSocket_ = -1;
+    const bool automatic = config_.port == 0;
+    const int first = automatic ? config_.portStart : config_.port;
+    const int last = automatic ? config_.portEnd : config_.port;
+    if (first < 1 || last > 65535 || first > last) {
+        LOGE("Sender: invalid listen port/range %d..%d", first, last);
         return false;
     }
-    addr.sin_port = htons(config_.port);
-    
-    if (bind(ss, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        LOGE("Sender: failed to bind %s:%d errno=%d (%s)",
-             bindAddr.empty() ? "0.0.0.0" : bindAddr.c_str(), config_.port, errno, std::strerror(errno));
+
+    // Bind/listen reserves the port atomically; no probe-and-close race.
+    for (int candidate = first; candidate <= last; ++candidate) {
+        const int ss = static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0));
+        if (ss < 0) return false;
+        int one = 1;
+#ifdef _WIN32
+        // SO_REUSEADDR on Windows can let a second sender steal this endpoint.
+        const int option = SO_EXCLUSIVEADDRUSE;
+#else
+        const int option = SO_REUSEADDR;
+#endif
+        if (setsockopt(ss, SOL_SOCKET, option, &one, sizeof(one)) != 0) {
+            close(ss);
+            return false;
+        }
+        addr.sin_port = htons(static_cast<uint16_t>(candidate));
+        if (bind(ss, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+            listen(ss, 5) == 0) {
+            serverSocket_.store(ss);
+            boundPort_.store(candidate);
+            break;
+        }
+        const int error = errno; // Save before close changes the socket error.
         close(ss);
-        serverSocket_ = -1;
-        return false;
-    }
-    
-    // P0 #5 (Codex): check listen() — a silent failure would leave start()
-    // reporting success with a non-listening socket.
-    if (listen(ss, 5) != 0) {
-        LOGE("Sender: listen() failed errno=%d", errno);
-        close(ss);
-        serverSocket_ = -1;
-        return false;
+#ifdef _WIN32
+        // Exclusive-address conflicts can report either Winsock error.
+        const bool occupied = error == WSAEADDRINUSE || error == WSAEACCES;
+#else
+        const bool occupied = error == EADDRINUSE;
+#endif
+        if (!automatic || !occupied || candidate == last) {
+            LOGE("Sender: cannot listen on %s:%d (socket error %d)",
+                 bindAddr.c_str(), candidate, error);
+            return false;
+        }
     }
     running_ = true;
-    
-    LOGI("Sender: listening on port %d", config_.port);
-    
-    acceptThread_ = std::thread(&Sender::acceptLoop, this);
+
+    LOGI("Sender: listening on port %d", port());
+    try {
+        acceptThread_ = std::thread(&Sender::acceptLoop, this);
+    } catch (...) {
+        running_ = false;
+        close(serverSocket_.exchange(-1));
+        boundPort_ = 0;
+        return false;
+    }
     return true;
 }
 
 void Sender::stop() {
     // P0 #5 (Codex): serialize the lifecycle (matches start()).
     std::lock_guard<std::mutex> lifecycle(lifecycleMutex_);
+    boundPort_ = 0;
     if (!running_.load()) {
         // Not running, but a stale listener fd may still be open (e.g. a failed
         // start after bind/listen). Close it exactly once and return.

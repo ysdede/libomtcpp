@@ -85,7 +85,9 @@ inline void applyVideoFrameMapping(MediaFrame& mf, bool opaque, bool interlaced,
 struct SenderConfig {
     std::string name = "OMT Sender";
     Quality quality = Quality::Default;
-    int port = Constants::NETWORK_PORT_START;
+    // Zero selects the first available port in [portStart, portEnd].
+    // A nonzero port is exact: a conflict never silently changes the endpoint.
+    int port = 0;
     // Phase C: which local IPv4 address to bind the TCP listener to. "0.0.0.0"
     // (the default, and the canonical value for "auto") binds all interfaces
     // (INADDR_ANY); an explicit dotted-quad binds ONE interface so a multi-NIC
@@ -110,6 +112,8 @@ struct SenderConfig {
     // Proven at the wire, not by grepping this header: qa-ompin/wire-slow-reader.cpp case
     // sender-identity connects a real peer and asserts what actually arrived.
     std::string senderInfoXml = "<OMTInfo ProductName=\"nodos OmtOut\" Manufacturer=\"Nodos\" Version=\"1.0\" />";
+    int portStart = Constants::NETWORK_PORT_START;
+    int portEnd = Constants::NETWORK_PORT_END;
 };
 
 /**
@@ -151,6 +155,8 @@ public:
      * @return true if started successfully
      */
     bool start();
+    // Actual bound port, or zero when stopped. Use this for discovery.
+    int port() const { return boundPort_.load(); }
     
     /**
      * Stop sender and disconnect all clients
@@ -245,6 +251,7 @@ private:
     
     // Network
     std::atomic<int> serverSocket_{-1};  // P0 #5: stable across accept-loop vs stop
+    std::atomic<int> boundPort_{0};
     std::thread acceptThread_;
     std::atomic<bool> running_{false};
     // P0 #5 (Codex): serialize start()/stop() so a concurrent stop can never

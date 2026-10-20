@@ -49,6 +49,14 @@ cmake --build build-android
 
 ## Usage
 
+Senders allocate a free TCP port in 6400–6600 by default, matching libomtnet.
+In C++, `SenderConfig.port = 0` enables automatic allocation; `portStart` and
+`portEnd` customize its range. A nonzero `port` is exact and fails on conflict.
+Use `Sender::port()` or `omt_send_getport()` after successful startup when
+registering discovery or displaying a direct address. Each independent stream
+needs its own listening endpoint; different names do not multiplex one port.
+The chosen port remains stable until the sender stops.
+
 ```cpp
 #include "libomt.h"
 
