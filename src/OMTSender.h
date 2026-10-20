@@ -20,7 +20,7 @@
 #include <string>
 #include <functional>
 #include <deque>
-#include "libomt.h"
+#include "../include/libomt.h"
 
 #include "OMTConstants.h"
 #include "OMTChannel.h"
