@@ -23,6 +23,13 @@
 
 #include "OMTLogging.h"
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+
 namespace omt {
 
 static_assert(sizeof(FrameHeader) == 16, "FrameHeader wire layout must stay 16 bytes");
@@ -87,6 +94,27 @@ SendOutcome sendAllPoll(int fd, const uint8_t* data, size_t length,
         if (errOut) *errOut = err;
         return o;
     };
+
+    // Speculative send: on non-blocking sockets in non-congested hot paths,
+    // send() usually succeeds immediately without needing poll().
+    if (offset < length && alive.load() && !peerGone.load()) {
+        const ssize_t n = ::send(fd, reinterpret_cast<const char*>(data + offset),
+                                 static_cast<int>(length - offset),
+                                 MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) {
+            offset += static_cast<size_t>(n);
+            if (offset >= length) {
+                return report(SendOutcome::Ok, 0);
+            }
+        } else if (n <= 0) {
+            const int err = (n == 0) ? EPIPE : errno;
+            if (IsPeerGoneErrno(err)) {
+                return report(SendOutcome::PeerGone, err);
+            }
+        }
+        // If EAGAIN/EWOULDBLOCK/EINTR or partial send, fall through to bounded poll loop.
+    }
+
     // P0 #7 (Codex): bound the write. A peer that accepts the socket but never
     // reads keeps poll() returning 0 forever (alive stays true), so an unbounded
     // loop would hang the caller — and for the SYNC metadata path, the caller
@@ -110,7 +138,8 @@ SendOutcome sendAllPoll(int fd, const uint8_t* data, size_t length,
         // POLLERR / POLLHUP land here too: we still attempt the send, because the
         // send is what reports the kernel's actual verdict. A half-closed peer that
         // merely shows POLLHUP but still accepts bytes stays alive by design.
-        const ssize_t n = ::send(fd, data + offset, length - offset,
+        const ssize_t n = ::send(fd, reinterpret_cast<const char*>(data + offset),
+                                 static_cast<int>(length - offset),
                                  MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) { offset += static_cast<size_t>(n); continue; }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
