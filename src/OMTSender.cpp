@@ -248,7 +248,9 @@ void Sender::acceptLoop() {
 
 void Sender::addChannel(std::unique_ptr<Channel> channel) {
     std::lock_guard<std::mutex> lock(channelsMutex_);
+    Channel* added = channel.get();
     channels_.push_back(std::move(channel));
+    publishTallyLocked(added);
 }
 
 void Sender::removeChannel(Channel* channel) {
@@ -783,9 +785,22 @@ void Sender::onDisconnected(Channel* channel) {
     // Cleanup will happen on next send or getStats call
 }
 
-void Sender::onTallyChanged(Channel* channel) {
-    LOGI("Tally changed: preview=%d, program=%d",
-         channel->isTallyPreview(), channel->isTallyProgram());
+void Sender::publishTallyLocked(Channel* newlyConnected) {
+    unsigned state = 0;
+    for (const auto& ch : channels_) if (ch->isConnected()) {
+        if (ch->isTallyPreview()) state |= 1;
+        if (ch->isTallyProgram()) state |= 2;
+    }
+    const bool changed = state != lastTally_;
+    lastTally_ = state;
+    for (const auto& ch : channels_)
+        if (ch->isConnected() && (changed || ch.get() == newlyConnected))
+            ch->queueTally((state & 1) != 0, (state & 2) != 0);
+}
+
+void Sender::onTallyChanged(Channel*) {
+    std::lock_guard<std::mutex> lock(channelsMutex_);
+    publishTallyLocked();
 }
 
 void Sender::onQualityChanged(Channel* channel) {

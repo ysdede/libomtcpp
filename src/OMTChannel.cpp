@@ -436,9 +436,28 @@ bool Channel::queueMetadata(const char* xml) {
     return true;
 }
 
+void Channel::holdTallyForRetry(std::vector<uint8_t> frame, bool onlyIfEmpty) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!onlyIfEmpty || pendingTally_.empty()) pendingTally_ = std::move(frame);
+    }
+    queueCV_.notify_one();
+}
+
+void Channel::queueTally(bool preview, bool program) {
+    const char* xml = preview ? (program ? MetadataConstants::TALLY_PREVIEWPROGRAM_LEGACY
+                                        : MetadataConstants::TALLY_PREVIEW_LEGACY)
+                              : (program ? MetadataConstants::TALLY_PROGRAM_LEGACY
+                                         : MetadataConstants::TALLY_NONE_LEGACY);
+    std::vector<uint8_t> frame;
+    if (connected_.load() && BuildMetadataFrame(xml, frame))
+        holdTallyForRetry(std::move(frame), false);
+}
+
 int64_t Channel::queuedMetadataBytes() const {
     std::lock_guard<std::mutex> lock(queueMutex_);
-    return pendingMetadataActive_ ? static_cast<int64_t>(pendingMetadata_.size()) : 0;
+    return static_cast<int64_t>(pendingTally_.size()) +
+        (pendingMetadataActive_ ? static_cast<int64_t>(pendingMetadata_.size()) : 0);
 }
 
 bool Channel::hasPendingWriteForTest() const {
@@ -744,6 +763,7 @@ void Channel::senderLoop() {
         AsyncBuffer* buf = nullptr;
         std::vector<uint8_t> meta;
         bool haveMeta = false;
+        bool haveTally = false;
         bool haveWork = false;
         bool stalledOut = false;
 
@@ -751,14 +771,14 @@ void Channel::senderLoop() {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCV_.wait_for(lock, std::chrono::milliseconds(100), [this] {
                 return !pendingQueue_.empty() || !running_ || !connected_
-                       || pendingMetadataActive_ || continuationPending_.load()
+                       || pendingMetadataActive_ || !pendingTally_.empty() || continuationPending_.load()
                        || peerGone_.load();
             });
             
             if (!running_ || !connected_) break;
 
             const bool queueing = !pendingQueue_.empty();
-            const bool waiting  = pendingMetadataActive_;
+            const bool waiting  = pendingMetadataActive_ || !pendingTally_.empty();
             const bool partial  = continuationPending_.load();
             haveWork = queueing || waiting || partial;
 
@@ -768,7 +788,11 @@ void Channel::senderLoop() {
             // for bytes we are not allowed to write yet, which inverts the
             // drop-oldest policy the ring is built around.
             if (haveWork && !partial) {
-                if (queueing) {
+                if (!pendingTally_.empty()) {
+                    meta = std::move(pendingTally_);
+                    pendingTally_.clear();
+                    haveMeta = haveTally = true;
+                } else if (queueing) {
                     buf = pendingQueue_.front();
                     pendingQueue_.pop();
                 } else if (waiting) {
@@ -888,7 +912,10 @@ void Channel::senderLoop() {
         }
         // Re-queue OUTSIDE the write lock: holdMetadataForRetry takes queueMutex_, and
         // sendSocketMutex_ -> queueMutex_ must never be a nesting this class relies on.
-        if (requeueMeta) holdMetadataForRetry(std::move(meta));
+        if (requeueMeta) {
+            if (haveTally) holdTallyForRetry(std::move(meta), true);
+            else holdMetadataForRetry(std::move(meta));
+        }
         if (!keepWriting) break;
     }
     
@@ -908,6 +935,8 @@ void Channel::senderLoop() {
         queueCV_.notify_all();
     }
 
+    // Report outside socket/queue locks; aggregation takes the sender lock.
+    if (listener_) listener_->onTallyChanged(this);
     LOGI("senderLoop: exiting");
 }
 

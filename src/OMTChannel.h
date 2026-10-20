@@ -169,6 +169,7 @@ public:
      * metadataSuperseded() counts what a replacement cost.
      */
     bool queueMetadata(const char* xml);
+    void queueTally(bool preview, bool program);
 
     // Observability for the harnesses (qa-ompin/wire-slow-reader.cpp). Each counter
     // is the only way to see a property that is invisible in the received bytes:
@@ -257,6 +258,9 @@ private:
     // queueMutex_, single-slot, newest wins — it cannot grow.
     std::vector<uint8_t> pendingMetadata_;
     bool pendingMetadataActive_ = false;
+    // Independent coalesced control slot: tally cannot replace the greeting.
+    std::vector<uint8_t> pendingTally_;
+    void holdTallyForRetry(std::vector<uint8_t> frame, bool onlyIfEmpty);
 
     // Liveness, as opposed to back-pressure: the last moment any byte of ours
     // actually reached the socket. If a channel has work to send and has made no

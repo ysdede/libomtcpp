@@ -265,6 +265,8 @@ private:
     // Channels
     std::vector<std::unique_ptr<Channel>> channels_;
     mutable std::mutex channelsMutex_;
+    unsigned lastTally_ = 0; // guarded by channelsMutex_
+    void publishTallyLocked(Channel* newlyConnected = nullptr);
     
     // VMX Encoder
     VMX_INSTANCE* vmxInstance_ = nullptr;
