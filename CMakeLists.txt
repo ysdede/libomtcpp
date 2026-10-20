@@ -21,6 +21,7 @@ set(LIBOMTCPP_SOURCES
     src/OMTAsyncPool.cpp
     src/OMTChannel.cpp
     src/OMTDiscovery.cpp
+    src/OMTReceiver.cpp
     src/OMTSender.cpp
 )
 
@@ -32,6 +33,8 @@ set(LIBOMTCPP_HEADERS
     src/OMTDiscovery.h
     src/OMTLogging.h
     src/OMTProtocol.h
+    src/OMTReceiver.h
+    src/OMTAudio.h
     src/OMTSender.h
 )
 

@@ -2,7 +2,7 @@
 
 Reviewed 2026-10-20 against libomtnet
 [`7d29031`](https://github.com/openmediatransport/libomtnet/tree/7d29031ff3f355ffa1f0cd08ee24d02e258445dd)
-and libomtcpp `767a68f250c199650aae87abbcf4c64ddadb466f`.
+with the media port based on libomtcpp `77d547eb663d3672bd3229e59559abd2f05b53a6`.
 This is a source-level capability inventory, with separately identified tests.
 It is not a full interoperability certification.
 
@@ -24,8 +24,8 @@ must compare the complete protocol/API surface as well as new commits.
   OMTSendReceiveBase, OMTSettings, OMTDiscovery, discovery client/server,
   OMTMultiConnectSocket and OMTRedirect.
 
-The C++ library currently implements an IPv4 VMX video sender and incoming
-control messages. Its public C header contains additional declarations whose
+The C++ library implements an IPv4 VMX/FPA1 sender, combined tally, preview,
+and a bounded reconnecting receiver (IPv4/IPv6 connections). Its public C header contains additional declarations whose
 implementations are stubs. Nodos supplies its own receiver and DNS backends;
 their existence does not establish library parity.
 
@@ -42,23 +42,23 @@ their existence does not establish library parity.
 | Interlace | Explicitly rejects unsupported interlaced heights rather than advertising progressive payload as interlaced | Cross-implementation field order/cadence at 480/576/1080 |
 | Color matrix | 0/601/709 accepted, matching official public enum; no BT.2020 matrix support | Internal BT2020 constant/comment is not implemented support; gamma/gamut metadata is not supplied by this field |
 | Timestamps | Caller timestamp copied unchanged | Official `Timestamp=-1` clock/pacing convenience is absent; Nodos generates its own timestamps |
-| Per-frame metadata | Missing: video header metadataLength always zero, C wrapper ignores FrameMetadata | UTF-8/NUL length, max uint16 size and payload-tail roundtrip |
-| Audio | Missing; C wrapper rejects Audio | FPA1 planar audio, active-channel mask, silence elision, timestamps and per-frame metadata |
-| Audio header declaration | **Incorrect unused definition:** 20 bytes with wrong order/fields; official header is 24 bytes: codec, sampleRate, samplesPerChannel, channels, activeChannels, reserved1 | Correct declaration and golden bytes before adding audio; internal PCM_F32 is not official FPA1 (`0x31415046`). Audio type comment says 3 but official type is 4 |
+| Per-frame metadata | Audio send/receive and video receive preserve the NUL-terminated payload tail | Video sender still ignores FrameMetadata |
+| Audio | FPA1 send/receive implemented: planar float32, 1–32 channels, silent-plane elision; independent golden bytes and official bidirectional tests | Native audio-device output and application A/V playout synchronization are outside transport scope |
+| Audio header declaration | Correct 24-byte FPA1 layout and audio type 4; golden byte/offset checks | Big-endian hosts remain untested |
 | Video subscription | Video withheld until canonical Video subscribe | Existing native subscription gate tests |
-| Audio/metadata subscription | Parsed and stored; audio unused; `Sender::sendMetadata` ignores metadata subscription | Separate protocol-control handshake from application metadata; enforce application subscription routing |
-| Tally receive | Canonical legacy `Program==` and well-formed `Program=` accepted; public aggregate getters work | Existing real-TCP `test_tally` covers receive/aggregation, not outbound tally |
-| Tally broadcast | **Missing:** `onTallyChanged` only logs; accept handshake sends info, not combined tally | Broadcast aggregate on change/disconnect and send initial aggregate to late joiners; use official legacy wire tokens |
-| Preview mode | Request parsed into previewMode; sender never consumes it | Generate/send actual reduced VMX preview with matching header; test full and preview subscribers together |
+| Audio/metadata subscription | Audio is delivered only to subscribed connections; receiver uses separate media sockets | Legacy Sender::sendMetadata is a control broadcast, not a subscription-aware application-send API |
+| Tally receive | Legacy Program== and well-formed tokens accepted; change events include transition to all-off | Zero-timeout returns state without consuming a change event |
+| Tally broadcast | Combined OR broadcast on change/disconnect and initial state for new clients; Windows/Linux and official interoperability tested | Long endurance with many clients |
+| Preview mode | VMX DC prefix sent per subscriber; original header geometry + Preview flag; full subscriber unchanged | Full/preview pixels and interlaced 1080 preview tested; no 8K live endurance claim |
 | Suggested quality | Highest connected suggestion applied on change, Default initially SQ | Recompute after last suggestion returns to Default, disconnect and manual-to-Default switch; current callback skips Default and disconnect only logs |
 | Congestion adaptation | C++ policy lowers profile after lifetime drop ratio >5%, including manual Medium/High | This is a local policy, not a protocol mandate; test one slow vs fast client and recovery. It does not imply adaptive network bitrate parity |
 | Sender information | C++ greeting/custom string helper implemented; struct C API stub; helper does not escape XML attributes | Quotes/ampersands, actual Version, updated and late-joining clients |
 | Connection metadata | Immediate broadcast only; not retained, clear is stub | Store/replay to future connections, clear deterministically |
-| Bidirectional user metadata | Unknown incoming XML logged/discarded; `omt_send_receive` stub | Bounded receive queue and ownership/timeout contract |
+| Bidirectional user metadata | Receiver sends XML with timestamp; sender exposes a bounded inbox through omt_send_receive; official interoperability passed | General sender application-metadata send and retained connection replay remain separate gaps |
 | Redirect | Missing C API implementation | Official redirect metadata, existing/new clients, chained/removed redirects |
 | TCP continuation/backpressure | Bounded nonblocking writes, retained partial frames, queued whole-frame eviction | Windows/Linux byte-resume, half-close, stalled/reset peer and concurrent accounting tests passed |
 | Multiple senders | **Implemented in #10:** default/port 0 binds first available port 6400â€“6600; actual bound port exposed | Concurrent allocation, exhaustion, exact-port collision, reuse and C API tests passed |
-| Network address families | IPv4 only (`sockaddr_in`, AF_INET); official sender is dual-stack | IPv4/IPv6 clients and address resolution/failover |
+| Network address families | Sender remains IPv4; receiver resolves IPv4/IPv6 candidates and tries them with bounded connect waits | IPv6 receiver path is compiled but not exercised by the IPv4 fixtures; no live DNS refresh |
 | DNS-SD | Host adapter/cache only; no native backend or automatic sender registration in library | `_omt._tcp`, `HOSTNAME (Source Name)`, actual port, duplicate/rename/removal, interface changes |
 | Discovery server | Missing client and server | Register/de-register/replay, server-derived IP, cleanup on disconnect; optional deployment mode, not needed for every video connection |
 
@@ -77,26 +77,30 @@ Declared symbols alone must not be advertised as supported functionality.
 | Functions | Status |
 | --- | --- |
 | `omt_send_create`, `omt_send_destroy`, `omt_send_getport` | Implemented; auto allocation tested. Creation does not automatically advertise DNS |
-| `omt_send` | Video subset only; ignores FrameMetadata and rejects Audio/Metadata |
+| `omt_send` | Video subset and FPA1 audio; audio attached metadata supported; standalone Metadata still rejected |
 | `omt_send_connections` | Stored channel count; disconnected entries await cleanup, not an exact instantaneous subscriber count |
 | `omt_send_set_info_str` | Custom helper works with escaping/version limitations above |
 | `omt_send_setsenderinformation` | Stub |
 | `omt_send_addconnectionmetadata` | Immediate send, not official retained/replayed behavior |
-| `omt_send_clearconnectionmetadata`, `omt_send_setredirect`, `omt_send_getaddress`, `omt_send_receive` | Stubs |
-| `omt_send_gettally` | Current booleans only; ignores timeout and returns false for all-off, unlike change notification semantics |
-| `omt_send_getvideostatistics` | Only Frames, FramesDropped, BytesSent written; remaining fields untouched; aggregation differs from official per-media statistics |
-| `omt_send_getaudiostatistics` | Stub |
+| `omt_send_clearconnectionmetadata`, `omt_send_setredirect`, `omt_send_getaddress` | Stubs |
+| `omt_send_receive` | Bounded incoming application metadata with timeout and owned C API result |
+| `omt_send_gettally` | Change notification/timeout, including all-off; zero-timeout reads state without consuming the event |
+| `omt_send_getvideostatistics` | Initialized output, video-only Frames/FramesDropped/BytesSent; other fields zero; aggregate active-channel totals, not lifetime or interval parity |
+| `omt_send_getaudiostatistics` | Initialized audio-only counts/bytes; same active-channel limitation |
 | `omt_send_get_frames_sent`, `omt_send_get_frames_dropped`, `omt_send_get_bytes_sent`, `omt_send_get_profile`, `omt_send_set_quality`, `omt_send_get_recent_drops_and_reset` | Implemented custom extensions; tested in the Nodos native suite, not official protocol features |
-| `omt_receive_create`, `omt_receive_destroy`, `omt_receive`, `omt_receive_send`, `omt_receive_settally`, `omt_receive_gettally`, `omt_receive_setflags`, `omt_receive_setsuggestedquality`, `omt_receive_getsenderinformation`, `omt_receive_getvideostatistics`, `omt_receive_getaudiostatistics` | All stubs |
+| `omt_receive_create`, `omt_receive_destroy`, `omt_receive`, `omt_receive_send`, `omt_receive_settally`, `omt_receive_gettally`, `omt_receive_setflags`, `omt_receive_setsuggestedquality`, `omt_receive_getsenderinformation`, `omt_receive_getvideostatistics`, `omt_receive_getaudiostatistics` | Implemented; owned per-type outputs, bounded queues, reconnect, preview/compressed flags, tally, quality, info, per-media statistics |
 | `omt_discovery_start`, `omt_discovery_stop`, `omt_discovery_register`, `omt_discovery_unregister`, `omt_discovery_getaddresses` | Cache/host-adapter operations only |
 | `omt_discovery_on_service_found`, `omt_discovery_on_service_lost`, `omt_discovery_on_registered`, `omt_discovery_on_registration_failed` | Host callbacks implemented; do not start OS discovery by themselves |
 | `omt_settings_get_string`, `omt_settings_set_string`, `omt_settings_get_integer`, `omt_settings_set_integer`, `omt_setloggingfilename` | Stubs; no settings.xml or DiscoveryServer configuration parity |
 | `omt_setlogcallback` | Implemented |
 | `omt_shutdown` | Destroys discovery singleton; callers must quiesce users first, not a concurrent global sender/receiver shutdown |
 
-Receiver stubs also mean no library implementation of compressed receive,
-preview decode, audio decode, automatic reconnect, multiple candidate-address
-connect, or redirect following. These are separate from the Nodos receiver.
+Receiver limitations: no redirect following, background DNS refresh or discovery
+subscription. Creation resolves addresses synchronously. At most 16 resolved
+candidates are tried sequentially, with bounded per-address connect waits. Decoder
+limits are 16–7680 pixels wide and 16–4320 high; interlace supports 480/576/1080.
+A P216 preview preference falls back to 8-bit UYVY. See the ownership and test
+contract in [MEDIA-PORT-VALIDATION.md](MEDIA-PORT-VALIDATION.md).
 
 Discovery follow-ups: getAddresses currently constructs an address from the
 display name, not the resolved endpoint; registration of an existing name does
@@ -112,17 +116,17 @@ transport/protocol workarounds to generated vendor trees.
 
 - [x] Automatic ports, exact override, actual endpoint API (#10).
 - [x] Review/refactor speculative send (#9); real byte oracle and bounded waits.
-- [ ] Tally broadcast on change/disconnect and initial state for late joiners.
+- [x] Tally broadcast on change/disconnect and initial state for late joiners.
 - [ ] Sender information struct API and XML escaping; retained connection metadata.
 - [ ] Quality reset/recompute for Default, disconnect and manual/auto transitions.
 - [ ] Alpha/flag semantics and honest unsupported-capability errors.
-- [ ] Correct audio wire declarations before any audio implementation.
-- [ ] VMX preview, compressed passthrough and per-frame metadata.
+- [x] Correct FPA1 audio wire declaration and golden-byte test.
+- [x] VMX preview and compressed receive.
+- [ ] Compressed send passthrough and video sender per-frame metadata.
 - [ ] C API initialization/error/timeout/ABI tests; no silent success for stubs.
 - [ ] DNS host-adapter contract and portable backend ownership, actual addresses,
   settings and IPv6. Test duplicate names and endpoint reuse separately.
-- [ ] Audio transport and receiver API as distinct features with independent
-  official receiver/sender fixtures; do not couple them to the current video fix.
+- [x] FPA1 audio and bounded receiver C API with official bidirectional fixtures.
 - [ ] Optional redirect and discovery-server mode with reconnect/removal fixtures.
 - [ ] Cross-implementation matrix: official libomtnet sender and receiver in both
   directions, byte/layout fixtures, malformed inputs, cancellation, hot source

@@ -60,6 +60,7 @@
   #define ECONNRESET WSAECONNRESET
   #undef ECONNABORTED
   #define ECONNABORTED WSAECONNABORTED
+  #undef EPIPE
   #define EPIPE 9991   // no WSA_EPIPE; unique so vendor's error switch keeps distinct cases
   #undef ETIMEDOUT
   #define ETIMEDOUT WSAETIMEDOUT
@@ -90,14 +91,14 @@
   inline int getsockopt(SOCKET s, int l, int o, void* v, int* n) { return ::getsockopt(s, l, o, (char*)v, n); }
   inline int send(SOCKET s, const void* b, int n, int f) { return ::send(s, (const char*)b, n, f); }
   inline int recv(SOCKET s, void* b, int n, int f) { return ::recv(s, (char*)b, n, f); }
-  inline int omt_closesocket_fd(int fd) { return ::closesocket((SOCKET)fd); }
+  inline int omt_closesocket_fd(SOCKET fd) { return ::closesocket((SOCKET)fd); }
   #define close omt_closesocket_fd
   #define MSG_NOSIGNAL 0
   #define MSG_DONTWAIT 0
   #define O_NONBLOCK 1
   #define F_GETFL 1
   #define F_SETFL 2
-  inline int fcntl(int fd, int cmd, int val = 0) {
+  inline int fcntl(SOCKET fd, int cmd, int val = 0) {
       if (cmd == F_SETFL) { u_long nb = (val & O_NONBLOCK) ? 1u : 0u;
                             return ioctlsocket(fd, FIONBIO, &nb) == 0 ? 0 : -1; }
       return 0;   // F_GETFL: the vendor never branches on the returned flags
@@ -110,14 +111,15 @@
   inline int poll(struct pollfd* fds, unsigned n, int ms) {
       fd_set r, w, e; FD_ZERO(&r); FD_ZERO(&w); FD_ZERO(&e);
       for (unsigned i = 0; i < n; ++i) {
-          SOCKET s = (SOCKET)(unsigned)fds[i].fd;
+          SOCKET s = fds[i].fd;
+          FD_SET(s, &e);
           if (fds[i].events & POLLIN)  FD_SET(s, &r);
           if (fds[i].events & POLLOUT) FD_SET(s, &w);
       }
       timeval tv; tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
       int rc = ::select(0, &r, &w, &e, ms < 0 ? nullptr : &tv);
       for (unsigned i = 0; i < n; ++i) {
-          SOCKET s = (SOCKET)(unsigned)fds[i].fd;
+          SOCKET s = fds[i].fd;
           short rv = 0;
           if (FD_ISSET(s, &r)) rv |= POLLIN;
           if (FD_ISSET(s, &w)) rv |= POLLOUT;

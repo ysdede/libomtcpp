@@ -108,10 +108,10 @@ bool readTally(int fd, const char* expected, bool* sawInfo = nullptr) {
     for (int i = 0; i < 32; ++i) {
         FrameHeader h{};
         if (!readExact(fd, &h, sizeof(h)) || h.version != 1 || h.frameType != 1 ||
-            h.dataLength <= 0 || h.dataLength > 65535 || h.metadataLength != h.dataLength) return false;
+            h.dataLength <= 0 || h.dataLength > 65535 || (h.metadataLength != 0 && h.metadataLength != h.dataLength)) return false;
         std::string xml(static_cast<size_t>(h.dataLength), '\0');
-        if (!readExact(fd, xml.data(), xml.size()) || xml.back() != '\0') return false;
-        xml.pop_back();
+        if (!readExact(fd, xml.data(), xml.size())) return false;
+        if (xml.back() == '\0') xml.pop_back();
         if (sawInfo && xml.find("<OMTInfo ") == 0) *sawInfo = true;
         if (xml == expected) return true;
     }

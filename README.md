@@ -2,20 +2,22 @@
 
 A native C++17 implementation of the [Open Media Transport (OMT)](https://github.com/openmediatransport) protocol for low-latency video streaming.
 
-Provides TCP transport, VMX video encoding, and multi-client sender functionality for OMT-compatible applications, including vMix, OBS, and broadcast production systems.
+Provides TCP transport, VMX video, FPA1 audio, multi-client sending and a bounded receiver C API.
 
-This is a video-sender subset, not a complete replacement for libomtnet.
-Audio and receiver C APIs are not implemented. See the
+This implements a subset of libomtnet. Discovery backends, redirects and some
+convenience APIs remain incomplete. See the
 [protocol/API support matrix](docs/PROTOCOL-PARITY.md) for supported behavior,
 remaining gaps and validation.
 
 ## Features
 
-- TCP-based video transport with VMX compression
+- VMX video and reduced preview transport
+- FPA1 planar audio with silent-channel elision
+- Reconnecting receiver with bounded queues and compressed video access
 - Multi-client streaming with per-channel threading
 - Quality negotiation (LQ/SQ/HQ)
-- Tally support (preview/program)
-- Sender identification and connection metadata
+- Combined preview/program tally, including late joiners
+- Sender identification and receiver-to-sender application metadata
 - Reusable buffer pools
 - C API for integration with native applications
 - Android NDK support
@@ -119,3 +121,32 @@ Discovery callbacks:
 ## License
 
 MIT License. See [LICENSE.txt](LICENSE.txt).
+
+## Receiver ownership and limits
+
+`omt_receive_create("omt://host:port", types, format, flags)` starts independent
+video/metadata and audio connections. Direct IPv4/IPv6 endpoints and names already
+resolved by the host discovery adapter are accepted. DNS is resolved during
+creation; redirect following and live address refresh are not implemented.
+
+Each receive result owns its raster, compressed bytes and attached metadata until
+the next receive call for that **same media type**, or receiver destruction.
+Do not call receive concurrently for the same type, and quiesce API callers before
+destroying an instance. Audio and video may be consumed separately. Queue limits
+are 4 video, 10 audio and 60 metadata frames; overflow drops the oldest whole
+queued frame. Reconnect clears the affected queue and does not replay pending
+application metadata from the old connection.
+
+VMX receive supports BGRA, UYVY, UYVA, P216 and PA16 according to the preferred
+format and wire alpha/high-bit-depth flags. Preview with a P216 preference returns
+UYVY because VMX preview is 8-bit. Compressed-only receive avoids raster decoding.
+Malformed sizes, channel masks and incomplete full VMX payloads are rejected.
+
+Audio is planar float32 FPA1, 1–32 channels, at most 1 MiB of decoded samples per
+frame. Standalone XML is sent without a wire NUL, matching libomtnet; returned
+C API XML includes a NUL. Both terminated and unterminated incoming XML are
+accepted. Application `omt_send_receive` uses a bounded 60-message queue.
+
+See [media-port validation](docs/MEDIA-PORT-VALIDATION.md) for reproducible tests,
+known upstream defects and the supported matrix. This does not add audio pins to
+applications that currently use only the video sender.
