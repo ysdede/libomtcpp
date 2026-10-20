@@ -4,6 +4,11 @@ A native C++17 implementation of the [Open Media Transport (OMT)](https://github
 
 Provides TCP transport, VMX video encoding, and multi-client sender functionality for OMT-compatible applications, including vMix, OBS, and broadcast production systems.
 
+This is a video-sender subset, not a complete replacement for libomtnet.
+Audio and receiver C APIs are not implemented. See the
+[protocol/API support matrix](docs/PROTOCOL-PARITY.md) for supported behavior,
+remaining gaps and validation.
+
 ## Features
 
 - TCP-based video transport with VMX compression
@@ -81,7 +86,7 @@ omt_send(sender, &frame);
 omt_send_destroy(sender);
 ```
 
-Supported input formats include YUV420, NV12, UYVY, and BGRA.
+Supported sender inputs are BGRA, BGRX, UYVY, YUY2 and NV12.
 
 ## mDNS Discovery
 
@@ -90,8 +95,8 @@ Service discovery is delegated to the host application. The library exposes disc
 | Platform | Discovery backend |
 |---|---|
 | Android | NsdManager (JNI) |
-| Linux | Avahi |
-| macOS / Windows | Bonjour |
+| Linux | Host-provided backend, for example Avahi |
+| macOS / Windows | Host-provided DNS-SD backend |
 
 Discovery callbacks:
 
