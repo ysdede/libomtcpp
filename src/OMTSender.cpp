@@ -23,6 +23,7 @@
 #endif
 
 #include "OMTLogging.h"
+#include "OMTAudio.h"
 namespace omt {
 
 Sender::Sender(const SenderConfig& config) : config_(config) {
@@ -248,7 +249,9 @@ void Sender::acceptLoop() {
 
 void Sender::addChannel(std::unique_ptr<Channel> channel) {
     std::lock_guard<std::mutex> lock(channelsMutex_);
+    Channel* added = channel.get();
     channels_.push_back(std::move(channel));
+    publishTallyLocked(added);
 }
 
 void Sender::removeChannel(Channel* channel) {
@@ -355,6 +358,9 @@ SenderStats Sender::getStats() {
         stats.totalFramesSent += chStats.framesSent;
         stats.totalFramesDropped += chStats.framesDropped;
         stats.totalBytesSent += chStats.bytesSent;
+        stats.audioFramesSent += chStats.audioFramesSent;
+        stats.audioFramesDropped += chStats.audioFramesDropped;
+        stats.audioBytesSent += chStats.audioBytesSent;
         stats.totalFramesOffered += chStats.framesOffered;
         stats.totalFramesTorn += chStats.framesTorn;
         stats.totalStaleEvicted += ch->staleEvicted();
@@ -593,7 +599,8 @@ bool Sender::ensureEncoderLocked(int width, int height, int colorSpace) {
 // this thread; Channel::sendAsync copies bytes into pooled buffers before it
 // returns, so reuse of the scratch cannot overlap an in-flight frame.
 // Returns encoded length (0 = failure).
-int Sender::encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out) {
+int Sender::encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out, int& previewLength) {
+    previewLength = 0;
     if (!vmxInstance_) return 0;
     int interlaced = (frame.flags & VideoFlags::Interlaced) ? 1 : 0;
     // Defense-in-depth (Codex interlace review): VMX only encodes interlaced at
@@ -633,6 +640,8 @@ int Sender::encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out
         LOGE("VMX_SaveTo bad length %d (cap %zu)", encodedLen, out.size());
         return 0;
     }
+    const int preview = VMX_GetEncodedPreviewLength(vmxInstance_);
+    if (preview > 0 && preview <= encodedLen) previewLength = preview;
     // Deliberately NOT out.resize(encodedLen): shrinking the size would make
     // the next frame's grow-back zero the whole scratch (see ensureScratch).
     // Callers consume data() + encodedLen.
@@ -657,11 +666,12 @@ int Sender::send(const MediaFrame& frame) {
     // dimensions/headers/payload. Congestion/quality decisions run AFTER.
     thread_local std::vector<uint8_t> payload;   // reused scratch; see sendAsync note
     int encodedLen = 0;
+    int previewLength = 0;
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
         if (!ensureEncoderLocked(frame.width, frame.height, frame.colorSpace))
             return 0;
-        encodedLen = encodeFrameLocked(frame, payload);
+        encodedLen = encodeFrameLocked(frame, payload, previewLength);
     }
     if (encodedLen <= 0) return 0;
     
@@ -706,9 +716,16 @@ int Sender::send(const MediaFrame& frame) {
             // Only send if client has subscribed to video (per OMT protocol)
             if (!ch->isVideoSubscribed()) continue;
             
-            int sent = ch->sendAsync(&header, sizeof(header),
-                                     &extHeader, sizeof(extHeader),
-                                     payload.data(), encodedLen);
+            FrameHeader clientHeader = header;
+            VideoExtHeader clientVideo = extHeader;
+            const bool preview = ch->isPreviewMode();
+            const int clientLength = preview ? previewLength : encodedLen;
+            if (clientLength <= 0) continue;
+            if (preview) clientVideo.flags |= VideoFlags::Preview;
+            clientHeader.dataLength = VideoExtHeader::SIZE + clientLength;
+            int sent = ch->sendAsync(&clientHeader, sizeof(clientHeader),
+                                     &clientVideo, sizeof(clientVideo),
+                                     payload.data(), clientLength);
             if (sent > 0) {
                 totalSent += sent;
             }
@@ -716,6 +733,31 @@ int Sender::send(const MediaFrame& frame) {
     }
     
     return totalSent > 0 ? encodedLen : 0;
+}
+
+int Sender::sendAudio(const AudioFrame& frame) {
+    if (!running_.load() || frame.sampleRate <= 0 || frame.metadataLength < 0 || frame.metadataLength > 65535)
+        return 0;
+    if (frame.metadataLength && (!frame.metadata ||
+        static_cast<const char*>(frame.metadata)[frame.metadataLength-1] != '\0')) return 0;
+    cleanupDisconnected();
+    thread_local std::vector<uint8_t> payload;
+    uint32_t active = 0;
+    if (!encodeAudio(frame.data, frame.dataLength, frame.channels, frame.samplesPerChannel, payload, active))
+        return 0;
+    if (frame.metadataLength) {
+        const auto* meta = static_cast<const uint8_t*>(frame.metadata);
+        payload.insert(payload.end(), meta, meta + frame.metadataLength);
+    }
+    AudioExtHeader audio{Codec::FPA1, frame.sampleRate, frame.samplesPerChannel, frame.channels, active, 0};
+    FrameHeader header{1, static_cast<uint8_t>(FrameType::Audio), frame.timestamp,
+        static_cast<uint16_t>(frame.metadataLength), static_cast<int32_t>(sizeof(audio) + payload.size())};
+    int sent = 0;
+    std::lock_guard<std::mutex> lock(channelsMutex_);
+    for (const auto& ch : channels_)
+        if (ch->isConnected() && ch->isAudioSubscribed())
+            sent += ch->sendAsync(&header, sizeof(header), &audio, sizeof(audio), payload.data(), payload.size());
+    return sent;
 }
 
 void Sender::sendMetadata(const std::string& xml) {
@@ -783,9 +825,23 @@ void Sender::onDisconnected(Channel* channel) {
     // Cleanup will happen on next send or getStats call
 }
 
-void Sender::onTallyChanged(Channel* channel) {
-    LOGI("Tally changed: preview=%d, program=%d",
-         channel->isTallyPreview(), channel->isTallyProgram());
+void Sender::publishTallyLocked(Channel* newlyConnected) {
+    unsigned state = 0;
+    for (const auto& ch : channels_) if (ch->isConnected()) {
+        if (ch->isTallyPreview()) state |= 1;
+        if (ch->isTallyProgram()) state |= 2;
+    }
+    const bool changed = state != lastTally_;
+    if (changed) { tallyChanged_ = true; tallyCV_.notify_all(); }
+    lastTally_ = state;
+    for (const auto& ch : channels_)
+        if (ch->isConnected() && (changed || ch.get() == newlyConnected))
+            ch->queueTally((state & 1) != 0, (state & 2) != 0);
+}
+
+void Sender::onTallyChanged(Channel*) {
+    std::lock_guard<std::mutex> lock(channelsMutex_);
+    publishTallyLocked();
 }
 
 void Sender::onQualityChanged(Channel* channel) {
@@ -859,11 +915,40 @@ void Sender::applyCongestionLocked(double dropRate) {
 
 void Sender::checkCongestion() {
     SenderStats stats = getStats();
-    if (stats.totalFramesSent < 30) return; // Too early
-    const double dropRate = (double)stats.totalFramesDropped / (double)(stats.totalFramesSent + stats.totalFramesDropped);
+    const auto sent = stats.totalFramesSent - stats.audioFramesSent;
+    const auto dropped = stats.totalFramesDropped - stats.audioFramesDropped;
+    if (sent < 30) return;
+    const double dropRate = static_cast<double>(dropped) / static_cast<double>(sent + dropped);
     applyCongestionLocked(dropRate);
 }
 
 // ... existing code ...
 
 } // namespace omt
+
+namespace omt {
+int Sender::getTally(int timeoutMs, OMTTally& tally) {
+    std::unique_lock<std::mutex> lock(channelsMutex_);
+    tallyCV_.wait_for(lock,std::chrono::milliseconds((std::max)(0,timeoutMs)),
+                      [&]{return tallyChanged_ || !running_.load();});
+    tally.preview=(lastTally_&1)?1:0;tally.program=(lastTally_&2)?1:0;
+    int changed=timeoutMs>0 && tallyChanged_?1:0;
+    if(timeoutMs>0)tallyChanged_=false;return changed;
+}
+void Sender::onMetadata(Channel*, int64_t timestamp, const std::string& xml) {
+    if(xml.size()>65534 || xml.find('\0')!=std::string::npos)return;
+    std::lock_guard<std::mutex> lock(metadataMutex_);
+    if(metadataInbox_.size()>=60)metadataInbox_.pop_front();
+    metadataInbox_.push_back({timestamp,xml});metadataCV_.notify_one();
+}
+OMTMediaFrame* Sender::receiveMetadata(int timeoutMs) {
+    std::unique_lock<std::mutex> lock(metadataMutex_);
+    if(!metadataCV_.wait_for(lock,std::chrono::milliseconds((std::max)(0,timeoutMs)),
+                            [&]{return !metadataInbox_.empty() || !running_.load();}) || metadataInbox_.empty())return nullptr;
+    auto message=std::move(metadataInbox_.front());metadataInbox_.pop_front();
+    receivedMetadata_=std::move(message.xml);
+    receivedFrame_={};receivedFrame_.Type=OMTFrameType_Metadata;receivedFrame_.Timestamp=message.timestamp;
+    receivedFrame_.Data=const_cast<char*>(receivedMetadata_.c_str());
+    receivedFrame_.DataLength=static_cast<int>(receivedMetadata_.size()+1);return &receivedFrame_;
+}
+}

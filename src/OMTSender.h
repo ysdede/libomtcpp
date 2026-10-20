@@ -19,6 +19,8 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <deque>
+#include "../include/libomt.h"
 
 #include "OMTConstants.h"
 #include "OMTChannel.h"
@@ -36,6 +38,7 @@ struct SenderStats {
     int64_t totalFramesDropped = 0;
     int64_t totalBytesSent = 0;
     int64_t totalEncodedBytes = 0;
+    int64_t audioFramesSent = 0, audioFramesDropped = 0, audioBytesSent = 0;
     int connectionCount = 0;
     // Aggregated per-channel frame partition (see ChannelStats): every frame handed to
     // a channel is offered once and lands in exactly one terminal counter, so
@@ -63,6 +66,17 @@ struct MediaFrame {
     int flags;
     int colorSpace;
     int64_t timestamp;
+};
+
+struct AudioFrame {
+    const void* data = nullptr;
+    int dataLength = 0;
+    int sampleRate = 48000;
+    int channels = 0;
+    int samplesPerChannel = 0;
+    int64_t timestamp = 0;
+    const void* metadata = nullptr;
+    int metadataLength = 0;
 };
 
 // P0 #3 / #14 (Codex): the SINGLE production mapping from the node's captured
@@ -168,6 +182,7 @@ public:
      * @return encoded frame size in bytes, or 0 on failure
      */
     int send(const MediaFrame& frame);
+    int sendAudio(const AudioFrame& frame);
     
     /**
      * Send metadata to all connected clients
@@ -234,6 +249,9 @@ public:
      */
     bool hasTallyPreview() const;
     bool hasTallyProgram() const;
+    int getTally(int timeoutMs, OMTTally& tally);
+    OMTMediaFrame* receiveMetadata(int timeoutMs);
+
     
     // Callbacks
     using ConnectionCallback = std::function<void(Channel*)>;
@@ -265,6 +283,16 @@ private:
     // Channels
     std::vector<std::unique_ptr<Channel>> channels_;
     mutable std::mutex channelsMutex_;
+    unsigned lastTally_ = 0; // guarded by channelsMutex_
+    bool tallyChanged_ = false;
+    std::condition_variable tallyCV_;
+    struct Metadata { int64_t timestamp; std::string xml; };
+    std::mutex metadataMutex_;
+    std::condition_variable metadataCV_;
+    std::deque<Metadata> metadataInbox_;
+    std::string receivedMetadata_;
+    OMTMediaFrame receivedFrame_{};
+    void publishTallyLocked(Channel* newlyConnected = nullptr);
     
     // VMX Encoder
     VMX_INSTANCE* vmxInstance_ = nullptr;
@@ -300,7 +328,7 @@ private:
     // P0 #9 (Codex): reject out-of-range dimensions/stride/length before alloc/VMX.
     static bool validateFrame(const MediaFrame& frame);
     bool ensureEncoderLocked(int width, int height, int colorSpace);
-    int encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out);
+    int encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out, int& previewLength);
     void destroyEncoder();
     int encodeFrame(const MediaFrame& frame);
     
@@ -315,6 +343,7 @@ private:
     void onDisconnected(Channel* channel) override;
     void onTallyChanged(Channel* channel) override;
     void onQualityChanged(Channel* channel) override;
+    void onMetadata(Channel*, int64_t timestamp, const std::string& xml) override;
     
     // Profile selection
     int selectProfile(Quality quality) const;

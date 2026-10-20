@@ -88,6 +88,36 @@ void sendCommand(int fd, const char* xml) {
     }
 }
 
+bool readExact(int fd, void* dst, size_t length) {
+    char* out = static_cast<char*>(dst);
+    while (length) {
+        int n = recv(fd, out, static_cast<int>(length), 0);
+        if (n <= 0) return false;
+        out += n; length -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool readTally(int fd, const char* expected, bool* sawInfo = nullptr) {
+#ifdef _WIN32
+    DWORD timeout = 1500;
+#else
+    timeval timeout{1, 500000};
+#endif
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    for (int i = 0; i < 32; ++i) {
+        FrameHeader h{};
+        if (!readExact(fd, &h, sizeof(h)) || h.version != 1 || h.frameType != 1 ||
+            h.dataLength <= 0 || h.dataLength > 65535 || (h.metadataLength != 0 && h.metadataLength != h.dataLength)) return false;
+        std::string xml(static_cast<size_t>(h.dataLength), '\0');
+        if (!readExact(fd, xml.data(), xml.size())) return false;
+        if (xml.back() == '\0') xml.pop_back();
+        if (sawInfo && xml.find("<OMTInfo ") == 0) *sawInfo = true;
+        if (xml == expected) return true;
+    }
+    return false;
+}
+
 bool pollState(const omt::Sender& s, bool wantPreview, bool wantProgram, int timeoutMs = 3000) {
     for (int waited = 0; waited < timeoutMs; waited += 20) {
         if (s.hasTallyPreview() == wantPreview && s.hasTallyProgram() == wantProgram) {
@@ -103,19 +133,22 @@ bool pollState(const omt::Sender& s, bool wantPreview, bool wantProgram, int tim
 int main() {
     omt::SenderConfig cfg;
     cfg.name = "tally-test";
-    cfg.port = 16487;   // outside the 6400..6600 production range
+    cfg.port = 0;   // outside the 6400..6600 production range
     omt::Sender sender(cfg);
     if (!sender.start()) {
         std::fprintf(stderr, "test: sender failed to start\n");
         return 2;
     }
 
-    int fd = connectClient(cfg.port);
+    int fd = connectClient(sender.port());
     if (fd < 0) {
         std::fprintf(stderr, "test: loopback connect failed\n");
         return 2;
     }
 
+    bool sawInfo = false;
+    check(readTally(fd, TALLY_NONE_LEGACY, &sawInfo), "new client receives initial all-off tally");
+    check(sawInfo || readTally(fd, cfg.senderInfoXml.c_str()), "initial tally does not replace sender information");
     // Legacy Program== tokens — what libomtnet, vMix and every official receiver sends.
     sendCommand(fd, TALLY_PROGRAM_LEGACY);
     check(pollState(sender, false, true), "legacy PROGRAM sets program tally");
@@ -141,6 +174,23 @@ int main() {
           "well-formed PROGRAM has no Program== typo");
     check(std::string(TALLY_PROGRAM_LEGACY).find("Program==") != std::string::npos,
           "legacy PROGRAM carries the Program== typo");
+
+    int second = connectClient(sender.port());
+    check(second >= 0 && readTally(second, TALLY_NONE_LEGACY), "second client receives initial state");
+    sendCommand(fd, TALLY_PROGRAM_LEGACY);
+    check(readTally(second, TALLY_PROGRAM_LEGACY), "program tally broadcast reaches another client");
+    sendCommand(second, TALLY_PREVIEW_LEGACY);
+    check(readTally(fd, TALLY_PREVIEWPROGRAM_LEGACY), "aggregate OR of two clients reaches first client");
+    check(readTally(second, TALLY_PREVIEWPROGRAM_LEGACY), "aggregate reaches second client");
+    int late = connectClient(sender.port());
+    check(late >= 0 && readTally(late, TALLY_PREVIEWPROGRAM_LEGACY), "late joiner receives existing aggregate");
+    sendCommand(fd, TALLY_NONE_LEGACY);
+    check(readTally(late, TALLY_PREVIEW_LEGACY), "one clear preserves the other client's tally");
+    linger reset{1, 0};
+    setsockopt(second, SOL_SOCKET, SO_LINGER, reinterpret_cast<const char*>(&reset), sizeof(reset));
+    close(second);
+    check(readTally(late, TALLY_NONE_LEGACY), "disconnect removes tally and broadcasts all-off without video sends");
+    close(late);
 
 #ifdef _WIN32
     closesocket(fd);

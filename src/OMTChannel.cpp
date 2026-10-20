@@ -43,6 +43,9 @@ namespace {
 // is sized for this so a well-formed frame always fits and a larger claim is
 // rejected before it can force a zero-capacity recv().
 constexpr int32_t kMaxControlPayload = 65535;
+bool isAudioRecord(const void* data, size_t length) {
+    return data && length >= sizeof(FrameHeader) && static_cast<const uint8_t*>(data)[1] == 4;
+}
 
 // The kernel naming the connection dead is the ONLY positive evidence that a peer
 // is gone. Everything else — above all a peer that simply stopped reading — is
@@ -141,25 +144,24 @@ SendOutcome sendAllPoll(int fd, const uint8_t* data, size_t length,
 }
 
 // Build the on-the-wire bytes of one control (Metadata) frame: the 16-byte
-// FrameHeader plus the NUL-terminated XML, exactly as libomtnet expects. Shared by
+// FrameHeader plus UTF-8 XML (no wire NUL, as in libomtnet). Shared by
 // the synchronous and the queued path so the two can never disagree on framing.
 bool BuildMetadataFrame(const char* xml, std::vector<uint8_t>& out) {
     if (!xml) return false;
     const size_t len = std::strlen(xml);
     if (len + 1 > static_cast<size_t>(kMaxControlPayload)) return false;
-    const int totalLen = static_cast<int>(len + 1);
+    const int totalLen = static_cast<int>(len);
 
     FrameHeader header{};
     header.version = 1;
     header.frameType = static_cast<uint8_t>(FrameType::Metadata);
     header.timestamp = 0;
-    header.metadataLength = static_cast<uint16_t>(totalLen);
+    header.metadataLength = 0;
     header.dataLength = totalLen;
 
     out.resize(sizeof(FrameHeader) + static_cast<size_t>(totalLen));
     memcpy(out.data(), &header, sizeof(FrameHeader));
     memcpy(out.data() + sizeof(FrameHeader), xml, len);
-    out[sizeof(FrameHeader) + len] = 0;
     return true;
 }
 } // namespace
@@ -310,8 +312,16 @@ ChannelStats Channel::getStats() const {
         bytesSent_.load(),
         bytesReceived_.load(),
         framesOffered_.load(),
-        framesTorn_.load()
+        framesTorn_.load(),
+        audioFramesSent_.load(), audioFramesDropped_.load(), audioBytesSent_.load()
     };
+}
+
+void Channel::recordSent(const uint8_t* data, size_t length) {
+    framesSent_++; bytesSent_ += static_cast<int64_t>(length);
+    if (isAudioRecord(data, length)) {
+        audioFramesSent_++; audioBytesSent_ += static_cast<int64_t>(length);
+    }
 }
 
 int64_t Channel::SteadyUs() {
@@ -436,9 +446,28 @@ bool Channel::queueMetadata(const char* xml) {
     return true;
 }
 
+void Channel::holdTallyForRetry(std::vector<uint8_t> frame, bool onlyIfEmpty) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!onlyIfEmpty || pendingTally_.empty()) pendingTally_ = std::move(frame);
+    }
+    queueCV_.notify_one();
+}
+
+void Channel::queueTally(bool preview, bool program) {
+    const char* xml = preview ? (program ? MetadataConstants::TALLY_PREVIEWPROGRAM_LEGACY
+                                        : MetadataConstants::TALLY_PREVIEW_LEGACY)
+                              : (program ? MetadataConstants::TALLY_PROGRAM_LEGACY
+                                         : MetadataConstants::TALLY_NONE_LEGACY);
+    std::vector<uint8_t> frame;
+    if (connected_.load() && BuildMetadataFrame(xml, frame))
+        holdTallyForRetry(std::move(frame), false);
+}
+
 int64_t Channel::queuedMetadataBytes() const {
     std::lock_guard<std::mutex> lock(queueMutex_);
-    return pendingMetadataActive_ ? static_cast<int64_t>(pendingMetadata_.size()) : 0;
+    return static_cast<int64_t>(pendingTally_.size()) +
+        (pendingMetadataActive_ ? static_cast<int64_t>(pendingMetadata_.size()) : 0);
 }
 
 bool Channel::hasPendingWriteForTest() const {
@@ -457,8 +486,7 @@ SendOutcome Channel::flushContinuationLocked(int fd, int timeoutMs) {
         if (continuationIsVideo_) {
             // The frame was counted neither when it stalled nor twice now: this is
             // the only place it becomes a frame the peer actually owns.
-            framesSent_++;
-            bytesSent_ += static_cast<int64_t>(continuation_.size());
+            recordSent(continuation_.data(), continuation_.size());
         }
         warnedWrite_[continuationIsVideo_ ? 0 : 1].store(false, std::memory_order_relaxed);
         noteProgress();
@@ -552,8 +580,8 @@ int64_t Channel::discardPending() {
         }
     }
     for (AsyncBuffer* b : stale) {
-        sendPool_->release(b);
-        countDropped();   // queued, never written: a drop, counted exactly once
+        countDropped(isAudioRecord(b->data.data(), b->length));
+        sendPool_->release(b);   // queued, never written: a drop, counted exactly once
     }
     return static_cast<int64_t>(stale.size());
 }
@@ -660,14 +688,14 @@ int Channel::sendAsync(const void* headerData, size_t headerLen,
         // The peer is already gone: this frame never began a write, so it is a drop,
         // not a mystery. (Before this line existed, every frame pushed after a
         // disconnect was counted by nobody.)
-        countDropped();
+        countDropped(isAudioRecord(headerData, headerLen));
         return 0;
     }
     
     size_t totalLen = headerLen + extHeaderLen + payloadLen;
     
     if (totalLen > static_cast<size_t>(Constants::VIDEO_MAX_SIZE)) {
-        countDropped();
+        countDropped(isAudioRecord(headerData, headerLen));
         LOGE("sendAsync: frame too large %zu", totalLen);
         return 0;
     }
@@ -702,14 +730,14 @@ int Channel::sendAsync(const void* headerData, size_t headerLen,
             if (!pendingQueue_.empty()) { stale = pendingQueue_.front(); pendingQueue_.pop(); }
         }
         if (stale) {
+            countDropped(isAudioRecord(stale->data.data(), stale->length));
             sendPool_->release(stale);
-            staleEvicted_++;
-            countDropped();      // the evicted frame: terminal, counted here, once
+            staleEvicted_++;      // the evicted frame: terminal, counted here, once
             buf = sendPool_->acquire();
         }
     }
     if (!buf) {
-        countDropped();
+        countDropped(isAudioRecord(headerData, headerLen));
         static int dropLog = 0;
         if (dropLog++ % 30 == 0) {
             LOGD("sendAsync: pool exhausted (dropped: %lld)", 
@@ -744,6 +772,7 @@ void Channel::senderLoop() {
         AsyncBuffer* buf = nullptr;
         std::vector<uint8_t> meta;
         bool haveMeta = false;
+        bool haveTally = false;
         bool haveWork = false;
         bool stalledOut = false;
 
@@ -751,14 +780,14 @@ void Channel::senderLoop() {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCV_.wait_for(lock, std::chrono::milliseconds(100), [this] {
                 return !pendingQueue_.empty() || !running_ || !connected_
-                       || pendingMetadataActive_ || continuationPending_.load()
+                       || pendingMetadataActive_ || !pendingTally_.empty() || continuationPending_.load()
                        || peerGone_.load();
             });
             
             if (!running_ || !connected_) break;
 
             const bool queueing = !pendingQueue_.empty();
-            const bool waiting  = pendingMetadataActive_;
+            const bool waiting  = pendingMetadataActive_ || !pendingTally_.empty();
             const bool partial  = continuationPending_.load();
             haveWork = queueing || waiting || partial;
 
@@ -768,7 +797,11 @@ void Channel::senderLoop() {
             // for bytes we are not allowed to write yet, which inverts the
             // drop-oldest policy the ring is built around.
             if (haveWork && !partial) {
-                if (queueing) {
+                if (!pendingTally_.empty()) {
+                    meta = std::move(pendingTally_);
+                    pendingTally_.clear();
+                    haveMeta = haveTally = true;
+                } else if (queueing) {
                     buf = pendingQueue_.front();
                     pendingQueue_.pop();
                 } else if (waiting) {
@@ -801,7 +834,7 @@ void Channel::senderLoop() {
         if (stalledOut) {
             // Popped, never began a write: a drop, counted exactly once (the
             // partition law — see Channel::countDropped).
-            if (buf) { sendPool_->release(buf); countDropped(); }
+            if (buf) { countDropped(isAudioRecord(buf->data.data(), buf->length)); sendPool_->release(buf); }
             warnOnce(3, "no byte of ours reached the socket for %d ms while %s was queued; "
                        "treating the peer as gone",
                      budgets_.stalledPeerMs, haveMeta ? "metadata" : "video");
@@ -854,7 +887,7 @@ void Channel::senderLoop() {
                     // it may let anyone observe the channel disconnected, which is why
                     // the count is not repeated on this line (test-line accounting, on
                     // wt3's pipeline).
-                    if (outcome == SendOutcome::Ok) { framesSent_++; bytesSent_ += len; bufWritten = true; }
+                    if (outcome == SendOutcome::Ok) { recordSent(buf->data.data(), buf->length); bufWritten = true; }
                     else if (outcome == SendOutcome::PeerGone) { bufWritten = true; }
                     else { bufWritten = true; }   // Timeout: retained, counted on completion/death
                 } else if (outcome == SendOutcome::Ok && haveMeta) {
@@ -883,12 +916,15 @@ void Channel::senderLoop() {
         // Every acquired buffer is released exactly once, on every path — a buffer stranded
         // here would shrink the ring permanently and eventually stop the channel sending.
         if (buf) {
-            if (bufLost) countDropped();
+            if (bufLost) countDropped(isAudioRecord(buf->data.data(), buf->length));
             sendPool_->release(buf);
         }
         // Re-queue OUTSIDE the write lock: holdMetadataForRetry takes queueMutex_, and
         // sendSocketMutex_ -> queueMutex_ must never be a nesting this class relies on.
-        if (requeueMeta) holdMetadataForRetry(std::move(meta));
+        if (requeueMeta) {
+            if (haveTally) holdTallyForRetry(std::move(meta), true);
+            else holdMetadataForRetry(std::move(meta));
+        }
         if (!keepWriting) break;
     }
     
@@ -908,6 +944,8 @@ void Channel::senderLoop() {
         queueCV_.notify_all();
     }
 
+    // Report outside socket/queue locks; aggregation takes the sender lock.
+    if (listener_) listener_->onTallyChanged(this);
     LOGI("senderLoop: exiting");
 }
 
@@ -1037,7 +1075,7 @@ void Channel::receiverLoop() {
                 }
                 
                 std::string xml(xmlData, strLen);
-                processMetadata(xml);
+                processMetadata(xml, header.timestamp);
             }
             
             // Shift buffer — every accepted frame consumes >= FrameHeader::SIZE,
@@ -1058,7 +1096,7 @@ void Channel::receiverLoop() {
     }
 }
 
-void Channel::processMetadata(const std::string& xml) {
+void Channel::processMetadata(const std::string& xml, int64_t timestamp) {
     // Subscription commands
     if (xml == MetadataConstants::CHANNEL_SUBSCRIBE_VIDEO) {
         subscriptions_ = subscriptions_.load() | Subscription::Video;
@@ -1129,7 +1167,7 @@ void Channel::processMetadata(const std::string& xml) {
         return;
     }
     
-    LOGD("Unknown metadata: %s", xml.c_str());
+    if (listener_) listener_->onMetadata(this, timestamp, xml);
 }
 
 } // namespace omt

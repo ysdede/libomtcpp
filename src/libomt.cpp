@@ -9,6 +9,8 @@
 
 #include "libomt.h"
 #include "OMTSender.h"
+#include "OMTReceiver.h"
+#include <memory>
 #include "OMTDiscovery.h"
 #include "OMTConstants.h"
 #include "OMTLogging.h"
@@ -95,24 +97,52 @@ void omt_discovery_on_registration_failed(const char* name, int errorCode) {
 }
 
 // =============================================================
-// Receive API (stubs - not implemented for Android sender)
+// Receive API
 // =============================================================
 
-omt_receive_t* omt_receive_create(const char* address, OMTFrameType frameTypes, 
-                                   OMTPreferredVideoFormat format, OMTReceiveFlags flags) {
-    return nullptr;
+omt_receive_t* omt_receive_create(const char* address, OMTFrameType types,
+                                 OMTPreferredVideoFormat format, OMTReceiveFlags flags) {
+    try {
+        auto receiver = std::make_unique<omt::Receiver>(address, types, format, flags);
+        if (!receiver->start()) return nullptr;
+        return reinterpret_cast<omt_receive_t*>(receiver.release());
+    } catch (...) { return nullptr; }
 }
-
-void omt_receive_destroy(omt_receive_t* instance) {}
-OMTMediaFrame* omt_receive(omt_receive_t* instance, OMTFrameType frameTypes, int timeoutMilliseconds) { return nullptr; }
-int omt_receive_send(omt_receive_t* instance, OMTMediaFrame* frame) { return 0; }
-void omt_receive_settally(omt_receive_t* instance, OMTTally* tally) {}
-int omt_receive_gettally(omt_send_t* instance, int timeoutMilliseconds, OMTTally* tally) { return 0; }
-void omt_receive_setflags(omt_receive_t* instance, OMTReceiveFlags flags) {}
-void omt_receive_setsuggestedquality(omt_receive_t* instance, OMTQuality quality) {}
-void omt_receive_getsenderinformation(omt_receive_t* instance, OMTSenderInfo* info) {}
-void omt_receive_getvideostatistics(omt_receive_t* instance, OMTStatistics* stats) {}
-void omt_receive_getaudiostatistics(omt_receive_t* instance, OMTStatistics* stats) {}
+void omt_receive_destroy(omt_receive_t* instance) {
+    delete reinterpret_cast<omt::Receiver*>(instance);
+}
+OMTMediaFrame* omt_receive(omt_receive_t* instance, OMTFrameType types, int timeout) {
+    if (!instance) return nullptr;
+    try { return reinterpret_cast<omt::Receiver*>(instance)->receive(types, timeout); }
+    catch (...) { return nullptr; }
+}
+int omt_receive_send(omt_receive_t* instance, OMTMediaFrame* frame) {
+    if (!instance || !frame) return 0;
+    try { return reinterpret_cast<omt::Receiver*>(instance)->sendMetadata(*frame); }
+    catch (...) { return 0; }
+}
+void omt_receive_settally(omt_receive_t* instance, OMTTally* tally) {
+    if (instance && tally) reinterpret_cast<omt::Receiver*>(instance)->setTally(*tally);
+}
+int omt_receive_gettally(omt_receive_t* instance, int timeout, OMTTally* tally) {
+    if (!instance || !tally) return 0;
+    return reinterpret_cast<omt::Receiver*>(instance)->getTally(timeout, *tally);
+}
+void omt_receive_setflags(omt_receive_t* instance, OMTReceiveFlags flags) {
+    if (instance) reinterpret_cast<omt::Receiver*>(instance)->setFlags(flags);
+}
+void omt_receive_setsuggestedquality(omt_receive_t* instance, OMTQuality quality) {
+    if (instance) reinterpret_cast<omt::Receiver*>(instance)->setQuality(quality);
+}
+void omt_receive_getsenderinformation(omt_receive_t* instance, OMTSenderInfo* info) {
+    if (info) { *info = {}; if (instance) reinterpret_cast<omt::Receiver*>(instance)->senderInfo(*info); }
+}
+void omt_receive_getvideostatistics(omt_receive_t* instance, OMTStatistics* stats) {
+    if (stats) { *stats = {}; if (instance) reinterpret_cast<omt::Receiver*>(instance)->statistics(false,*stats); }
+}
+void omt_receive_getaudiostatistics(omt_receive_t* instance, OMTStatistics* stats) {
+    if (stats) { *stats = {}; if (instance) reinterpret_cast<omt::Receiver*>(instance)->statistics(true,*stats); }
+}
 
 // =============================================================
 // Send API - Main Implementation
@@ -156,9 +186,18 @@ int omt_send_getport(omt_send_t* instance) {
 int omt_send(omt_send_t* instance, OMTMediaFrame* frame) {
     if (!instance || !frame) return 0;
     
+    try {
     auto* sender = reinterpret_cast<omt::Sender*>(instance);
     
-    // Only handle video for now
+    if (frame->Type == OMTFrameType_Audio) {
+        if (frame->Codec != OMTCodec_FPA1) return 0;
+        omt::AudioFrame audio;
+        audio.data = frame->Data; audio.dataLength = frame->DataLength;
+        audio.sampleRate = frame->SampleRate; audio.channels = frame->Channels;
+        audio.samplesPerChannel = frame->SamplesPerChannel; audio.timestamp = frame->Timestamp;
+        audio.metadata = frame->FrameMetadata; audio.metadataLength = frame->FrameMetadataLength;
+        return sender->sendAudio(audio);
+    }
     if (frame->Type != OMTFrameType_Video) return 0;
     
     omt::MediaFrame mf{};
@@ -176,6 +215,7 @@ int omt_send(omt_send_t* instance, OMTMediaFrame* frame) {
     mf.timestamp = frame->Timestamp;
     
     return sender->send(mf);
+    } catch (...) { return 0; }
 }
 
 int omt_send_connections(omt_send_t* instance) {
@@ -216,17 +256,15 @@ int omt_send_getaddress(omt_send_t* instance, char* address, int maxLength) {
 }
 
 OMTMediaFrame* omt_send_receive(omt_send_t* instance, int timeoutMilliseconds) {
-    return nullptr;
+    if(!instance)return nullptr;
+    try { return reinterpret_cast<omt::Sender*>(instance)->receiveMetadata(timeoutMilliseconds); }
+    catch(...) { return nullptr; }
 }
 
 int omt_send_gettally(omt_send_t* instance, int timeoutMilliseconds, OMTTally* tally) {
     if (!instance || !tally) return 0;
     
-    auto* sender = reinterpret_cast<omt::Sender*>(instance);
-    tally->preview = sender->hasTallyPreview() ? 1 : 0;
-    tally->program = sender->hasTallyProgram() ? 1 : 0;
-    
-    return (tally->preview || tally->program) ? 1 : 0;
+    return reinterpret_cast<omt::Sender*>(instance)->getTally(timeoutMilliseconds,*tally);
 }
 
 void omt_send_getvideostatistics(omt_send_t* instance, OMTStatistics* stats) {
@@ -235,13 +273,19 @@ void omt_send_getvideostatistics(omt_send_t* instance, OMTStatistics* stats) {
     auto* sender = reinterpret_cast<omt::Sender*>(instance);
     auto s = sender->getStats();
     
-    stats->Frames = s.totalFramesSent;
-    stats->FramesDropped = s.totalFramesDropped;
-    stats->BytesSent = s.totalBytesSent;
+    *stats = {};
+    stats->Frames = s.totalFramesSent - s.audioFramesSent;
+    stats->FramesDropped = s.totalFramesDropped - s.audioFramesDropped;
+    stats->BytesSent = s.totalBytesSent - s.audioBytesSent;
 }
 
 void omt_send_getaudiostatistics(omt_send_t* instance, OMTStatistics* stats) {
-    // Audio not implemented yet
+    if (!instance || !stats) return;
+    *stats = {};
+    const auto s = reinterpret_cast<omt::Sender*>(instance)->getStats();
+    stats->Frames = s.audioFramesSent;
+    stats->FramesDropped = s.audioFramesDropped;
+    stats->BytesSent = s.audioBytesSent;
 }
 
 // =============================================================

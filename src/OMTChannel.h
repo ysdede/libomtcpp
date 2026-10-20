@@ -93,6 +93,7 @@ struct ChannelStats {
     int64_t bytesReceived = 0;
     int64_t framesOffered = 0;
     int64_t framesTorn = 0;
+    int64_t audioFramesSent = 0, audioFramesDropped = 0, audioBytesSent = 0;
 };
 
 /**
@@ -104,6 +105,7 @@ public:
     virtual void onDisconnected(class Channel* channel) = 0;
     virtual void onTallyChanged(class Channel* channel) = 0;
     virtual void onQualityChanged(class Channel* channel) = 0;
+    virtual void onMetadata(class Channel*, int64_t, const std::string&) {}
 };
 
 /**
@@ -169,6 +171,7 @@ public:
      * metadataSuperseded() counts what a replacement cost.
      */
     bool queueMetadata(const char* xml);
+    void queueTally(bool preview, bool program);
 
     // Observability for the harnesses (qa-ompin/wire-slow-reader.cpp). Each counter
     // is the only way to see a property that is invisible in the received bytes:
@@ -257,6 +260,9 @@ private:
     // queueMutex_, single-slot, newest wins — it cannot grow.
     std::vector<uint8_t> pendingMetadata_;
     bool pendingMetadataActive_ = false;
+    // Independent coalesced control slot: tally cannot replace the greeting.
+    std::vector<uint8_t> pendingTally_;
+    void holdTallyForRetry(std::vector<uint8_t> frame, bool onlyIfEmpty);
 
     // Liveness, as opposed to back-pressure: the last moment any byte of ours
     // actually reached the socket. If a channel has work to send and has made no
@@ -326,6 +332,8 @@ private:
     /// cannot drift from framesDropped_ the way a second tally at each call site would.
     std::atomic<int64_t> recentDrops_{0};
     std::atomic<int64_t> bytesSent_{0};
+    std::atomic<int64_t> audioFramesSent_{0}, audioFramesDropped_{0}, audioBytesSent_{0};
+    void recordSent(const uint8_t* data, size_t length);
     std::atomic<int64_t> bytesReceived_{0};
 
     /// The ONE place a frame is counted as dropped, so no early-return path in
@@ -333,7 +341,7 @@ private:
     /// Both the lifetime counter and the recent-drop window move HERE, never at a
     /// call site — a drop that is invisible to recentDrops_ is a congestion alert
     /// that never fires (the exact Android defect this port closes on desktop).
-    void countDropped() { framesDropped_++; recentDrops_++; }
+    void countDropped(bool audio = false) { framesDropped_++; recentDrops_++; if (audio) audioFramesDropped_++; }
 
     /// The ONE place a torn write is counted (see countDropped for the same
     /// single-site discipline): a frame whose write BEGAN and will never complete
@@ -385,7 +393,7 @@ private:
     static int64_t SteadyUs();
     
     // Metadata processing (port of ProcessMetadata)
-    void processMetadata(const std::string& xml);
+    void processMetadata(const std::string& xml, int64_t timestamp);
     
     // Socket helpers
     void setSendBuffer(int size);
