@@ -123,7 +123,7 @@ omt_send_t* omt_send_create(const char* name, OMTQuality quality) {
     
     omt::SenderConfig config;
     config.name = name ? name : "OMT Android";
-    config.port = omt::Constants::NETWORK_PORT_START;
+    config.port = 0; // Match libomtnet: allocate a free sender port.
     
     switch (quality) {
         case OMTQuality_Low: config.quality = omt::Quality::Low; break;
@@ -147,6 +147,10 @@ void omt_send_destroy(omt_send_t* instance) {
         auto* sender = reinterpret_cast<omt::Sender*>(instance);
         delete sender;
     }
+}
+
+int omt_send_getport(omt_send_t* instance) {
+    return instance ? reinterpret_cast<omt::Sender*>(instance)->port() : 0;
 }
 
 int omt_send(omt_send_t* instance, OMTMediaFrame* frame) {

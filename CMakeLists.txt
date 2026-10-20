@@ -37,6 +37,7 @@ set(LIBOMTCPP_HEADERS
 
 # Library target
 add_library(omt ${LIBOMTCPP_SOURCES} ${LIBOMTCPP_HEADERS})
+target_compile_definitions(omt PUBLIC LIBOMTCPP_NO_AUTOLINK)
 
 target_include_directories(omt
     PUBLIC

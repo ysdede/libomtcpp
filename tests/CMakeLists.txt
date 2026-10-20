@@ -35,3 +35,4 @@ endfunction()
 
 omt_add_test(test_tally)
 omt_add_test(test_perf)
+omt_add_test(test_sender_ports)
