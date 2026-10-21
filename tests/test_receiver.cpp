@@ -168,17 +168,32 @@ static void mediaTests() {
         require(frame->Codec==expectedCodec,"preferred format contract");
         auto* decoder=VMX_Create({w,h},VMX_PROFILE_DEFAULT,VMX_COLORSPACE_BT709);
         require(decoder && VMX_LoadFrom(decoder,static_cast<uint8_t*>(frame->CompressedData),frame->CompressedLength)==VMX_ERR_OK,"reference decoder");
+        auto decodeInto=[&](std::vector<uint8_t>& dst) {
+            if(frame->Codec==OMTCodec_BGRA)
+                return preview?(alpha?VMX_DecodePreviewBGRA(decoder,dst.data(),frame->Stride):VMX_DecodePreviewBGRX(decoder,dst.data(),frame->Stride)):
+                               (alpha?VMX_DecodeBGRA(decoder,dst.data(),frame->Stride):VMX_DecodeBGRX(decoder,dst.data(),frame->Stride));
+            if(frame->Codec==OMTCodec_UYVA)
+                return preview?VMX_DecodePreviewUYVA(decoder,dst.data(),frame->Stride):VMX_DecodeUYVA(decoder,dst.data(),frame->Stride);
+            if(frame->Codec==OMTCodec_P216)return VMX_DecodeP216(decoder,dst.data(),frame->Stride);
+            return preview?VMX_DecodePreviewUYVY(decoder,dst.data(),frame->Stride):VMX_DecodeUYVY(decoder,dst.data(),frame->Stride);
+        };
         std::vector<uint8_t> expected(frame->DataLength,0);
-        VMX_ERR result=VMX_ERR_UNKNOWN;
-        if(frame->Codec==OMTCodec_BGRA)
-            result=preview?(alpha?VMX_DecodePreviewBGRA(decoder,expected.data(),frame->Stride):VMX_DecodePreviewBGRX(decoder,expected.data(),frame->Stride)):
-                           (alpha?VMX_DecodeBGRA(decoder,expected.data(),frame->Stride):VMX_DecodeBGRX(decoder,expected.data(),frame->Stride));
-        else if(frame->Codec==OMTCodec_UYVA)
-            result=preview?VMX_DecodePreviewUYVA(decoder,expected.data(),frame->Stride):VMX_DecodeUYVA(decoder,expected.data(),frame->Stride);
-        else if(frame->Codec==OMTCodec_P216)result=VMX_DecodeP216(decoder,expected.data(),frame->Stride);
-        else if(frame->Codec==OMTCodec_UYVY)
-            result=preview?VMX_DecodePreviewUYVY(decoder,expected.data(),frame->Stride):VMX_DecodeUYVY(decoder,expected.data(),frame->Stride);
-        require(result==VMX_ERR_OK && std::memcmp(frame->Data,expected.data(),expected.size())==0,"decoded pixels equal independent VMX oracle");
+        require(decodeInto(expected)==VMX_ERR_OK && std::memcmp(frame->Data,expected.data(),expected.size())==0,"decoded pixels equal independent VMX oracle");
+        std::vector<uint8_t> poison(expected.size(),0xA5);
+        require(decodeInto(poison)==VMX_ERR_OK && poison==expected,"decoder overwrites every output byte regardless of prior buffer contents");
+        // The receiver owns one output vector per media type. A second frame with
+        // identical geometry exercises the PR's steady-state no-clear branch.
+        for(size_t i=0;i<raster.size();i+=4){raster[i]=37;raster[i+1]=149;raster[i+2]=201;raster[i+3]=alpha?64:255;}
+        ++source.timestamp;
+        OMTMediaFrame* second=nullptr;
+        require(waitUntil([&]{sender.send(source);second=omt_receive(r.get(),OMTFrameType_Video,20);
+                            return second && second->Timestamp==source.timestamp;}),"second same-size frame received");
+        require(second->DataLength==static_cast<int>(expected.size()) &&
+                VMX_LoadFrom(decoder,static_cast<uint8_t*>(second->CompressedData),second->CompressedLength)==VMX_ERR_OK,
+                "second frame reference loads");
+        std::fill(expected.begin(),expected.end(),0);
+        require(decodeInto(expected)==VMX_ERR_OK && std::memcmp(second->Data,expected.data(),expected.size())==0,
+                "reused receiver buffer matches fresh decode after changed frame");
         VMX_Destroy(decoder);
         r.reset();require(waitUntil([&]{sender.send(source);return sender.videoSubscriberCount()==0;}),"receiver closes old subscription");
     }
@@ -246,11 +261,39 @@ static void edgeMediaTests() {
                         VMX_DecodeBGRA(codec.get(),expected.data(),w*4);
             require(result==VMX_ERR_OK && f->DataLength==static_cast<int>(expected.size()) &&
                     std::memcmp(f->Data,expected.data(),expected.size())==0,"interlaced preview/high-bit alpha pixel oracle");
+            std::vector<uint8_t> poisoned(expected.size(),0xA5);
+            result=high?VMX_DecodePA16(codec.get(),poisoned.data(),w*2):
+                preview?VMX_DecodePreviewBGRA(codec.get(),poisoned.data(),outW*4):
+                        VMX_DecodeBGRA(codec.get(),poisoned.data(),w*4);
+            require(result==VMX_ERR_OK && poisoned==expected,"interlaced/high-bit decoder overwrites every output byte");
             peer.sendBytes(make(true,false));
             require(!omt_receive(r.get(),OMTFrameType_Video,100),"DC-only payload cannot reuse stale AC as a full frame");
         }
     }
 }
+static void largeFrameOverwriteTests() {
+    constexpr int w=3840,h=2160;
+    auto destroy=[](VMX_INSTANCE* p){VMX_Destroy(p);};
+    std::unique_ptr<VMX_INSTANCE,decltype(destroy)> codec(
+        VMX_Create({w,h},VMX_PROFILE_OMT_SQ,VMX_COLORSPACE_BT709),destroy);
+    require(codec!=nullptr,"4K codec created");
+    std::vector<BYTE> source(static_cast<size_t>(w)*h*4);
+    for(size_t i=0;i<source.size();i+=4){source[i]=31;source[i+1]=79;source[i+2]=183;source[i+3]=255;}
+    require(VMX_EncodeBGRA(codec.get(),source.data(),w*4,0)==VMX_ERR_OK,"4K frame encoded");
+    std::vector<BYTE> compressed(source.size());
+    const int length=VMX_SaveTo(codec.get(),compressed.data(),static_cast<int>(compressed.size()));
+    require(length>0 && VMX_LoadFrom(codec.get(),compressed.data(),length)==VMX_ERR_OK,"4K frame loaded");
+    for(int format=0;format<2;++format) {
+        const int stride=w*(format?2:4);
+        std::vector<BYTE> clear(static_cast<size_t>(stride)*h,0);
+        std::vector<BYTE> poison(clear.size(),0xA5);
+        const auto decode=[&](std::vector<BYTE>& dst){return format?
+            VMX_DecodeUYVY(codec.get(),dst.data(),stride):VMX_DecodeBGRA(codec.get(),dst.data(),stride);};
+        require(decode(clear)==VMX_ERR_OK && decode(poison)==VMX_ERR_OK && clear==poison,
+                "4K decoder fills all BGRA/UYVY output bytes");
+    }
+}
 int main() try {
-    wireTests();mediaTests();edgeMediaTests();std::printf("PASS receiver: %d checks\n",checks);return 0;
+    wireTests();mediaTests();edgeMediaTests();largeFrameOverwriteTests();
+    std::printf("PASS receiver: %d checks\n",checks);return 0;
 } catch(const std::exception& e){std::fprintf(stderr,"FAIL receiver: %s (%d checks)\n",e.what(),checks);return 1;}
