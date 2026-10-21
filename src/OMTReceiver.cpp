@@ -403,7 +403,7 @@ bool Receiver::Impl::decode(Packet& p,int index,Output& out,int currentFlags) {
                                                  (planarAlpha?OMTCodec_UYVA:OMTCodec_UYVY);
         f.Stride=f.Width*(bgra?4:2);
         size_t bytes=static_cast<size_t>(f.Width)*f.Height*(bgra?4:p216?(planarAlpha?6:4):(planarAlpha?3:2));
-        out.pixels.assign(bytes,0);
+        if(out.pixels.size()!=bytes)out.pixels.resize(bytes);
         VMX_ERR result=VMX_ERR_UNKNOWN;
         if(preview) {
             if(bgra)result=alpha?VMX_DecodePreviewBGRA(decoder,out.pixels.data(),f.Stride):VMX_DecodePreviewBGRX(decoder,out.pixels.data(),f.Stride);
