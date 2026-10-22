@@ -19,6 +19,25 @@ inline bool audioSize(int channels, int samples, size_t& bytes) {
     bytes=static_cast<size_t>(size);return true;
 }
 
+inline bool isPlaneNonZero(const uint8_t* p, size_t plane) {
+    size_t i = 0;
+    uint64_t v64;
+    for (; i + 8 <= plane; i += 8) {
+        std::memcpy(&v64, p + i, 8);
+        if (v64 != 0) return true;
+    }
+    if (i + 4 <= plane) {
+        uint32_t v32;
+        std::memcpy(&v32, p + i, 4);
+        if (v32 != 0) return true;
+        i += 4;
+    }
+    for (; i < plane; ++i) {
+        if (p[i] != 0) return true;
+    }
+    return false;
+}
+
 // Silence is an all-zero byte plane, matching libomtnet. Negative zero, NaN,
 // infinities and subnormal samples retain their original bit representation.
 inline bool encodeAudio(const void* data, int length, int channels, int samples,
@@ -30,9 +49,8 @@ inline bool encodeAudio(const void* data, int length, int channels, int samples,
     const auto* input=static_cast<const uint8_t*>(data);
     output.clear();output.reserve(bytes);active=0;
     for(int ch=0;ch<channels;++ch) {
-        const uint8_t* p=input+ch*plane;bool used=false;
-        for(size_t i=0;i<plane;++i)if(p[i]){used=true;break;}
-        if(used){active|=uint32_t{1}<<ch;output.insert(output.end(),p,p+plane);}
+        const uint8_t* p=input+ch*plane;
+        if(isPlaneNonZero(p, plane)){active|=uint32_t{1}<<ch;output.insert(output.end(),p,p+plane);}
     }
     return true;
 }
