@@ -6,6 +6,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace omt {
 static_assert(sizeof(AudioExtHeader)==24, "FPA1 wire header is 24 bytes");
 static_assert(offsetof(AudioExtHeader,samplesPerChannel)==8 &&
@@ -19,6 +23,21 @@ inline bool audioSize(int channels, int samples, size_t& bytes) {
     bytes=static_cast<size_t>(size);return true;
 }
 
+// Check if an audio plane contains non-zero bytes (active plane).
+// Scans 64-bit words for 8x speedup over scalar byte-by-byte scanning.
+inline bool isPlaneActive(const uint8_t* p, size_t plane) {
+    size_t i = 0;
+    for (; i + 8 <= plane; i += 8) {
+        uint64_t val;
+        std::memcpy(&val, p + i, sizeof(val));
+        if (val != 0) return true;
+    }
+    for (; i < plane; ++i) {
+        if (p[i] != 0) return true;
+    }
+    return false;
+}
+
 // Silence is an all-zero byte plane, matching libomtnet. Negative zero, NaN,
 // infinities and subnormal samples retain their original bit representation.
 inline bool encodeAudio(const void* data, int length, int channels, int samples,
@@ -28,12 +47,19 @@ inline bool encodeAudio(const void* data, int length, int channels, int samples,
        static_cast<size_t>(length)<bytes)return false;
     const size_t plane=static_cast<size_t>(samples)*4;
     const auto* input=static_cast<const uint8_t*>(data);
-    output.clear();output.reserve(bytes);active=0;
+    output.clear();
+    output.resize(bytes);
+    active=0;
+    size_t offset=0;
     for(int ch=0;ch<channels;++ch) {
-        const uint8_t* p=input+ch*plane;bool used=false;
-        for(size_t i=0;i<plane;++i)if(p[i]){used=true;break;}
-        if(used){active|=uint32_t{1}<<ch;output.insert(output.end(),p,p+plane);}
+        const uint8_t* p=input+ch*plane;
+        if(isPlaneActive(p, plane)) {
+            active|=uint32_t{1}<<ch;
+            std::memcpy(output.data()+offset,p,plane);
+            offset+=plane;
+        }
     }
+    output.resize(offset);
     return true;
 }
 
@@ -44,8 +70,17 @@ inline bool decodeAudio(const AudioExtHeader& header, const uint8_t* data, size_
        !audioSize(header.channels,header.samplesPerChannel,bytes))return false;
     const uint32_t allowed=header.channels==32 ? UINT32_MAX : (uint32_t{1}<<header.channels)-1;
     if(header.activeChannels & ~allowed)return false;
-    unsigned count=0;uint32_t bits=header.activeChannels;
+
+    unsigned count=0;
+#if defined(_MSC_VER)
+    count=static_cast<unsigned>(__popcnt(header.activeChannels));
+#elif defined(__GNUG__) || defined(__clang__)
+    count=static_cast<unsigned>(__builtin_popcount(header.activeChannels));
+#else
+    uint32_t bits=header.activeChannels;
     while(bits){count+=bits&1;bits>>=1;}
+#endif
+
     const size_t plane=static_cast<size_t>(header.samplesPerChannel)*4;
     if(length!=count*plane || (length && !data))return false;
     output.assign(bytes,0);
