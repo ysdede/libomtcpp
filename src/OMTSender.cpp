@@ -299,13 +299,13 @@ void ensureScratch(std::vector<uint8_t>& buf, size_t need) {
 
 } // namespace
 
-int Sender::cleanupDisconnected() {
+Sender::ChannelSubscriberCounts Sender::cleanupAndCountSubscribers() {
     // P0 #4 (Codex): collect disconnected channels into a local owning vector
     // under the lock, then destroy (join) them after releasing it. Returns the
-    // number of channels still connected, so callers retire channels and test
-    // for subscribers in ONE channelsMutex_ pass.
+    // counts of total active channels and video/audio subscribers in ONE
+    // channelsMutex_ pass.
     std::vector<std::unique_ptr<Channel>> retiring;
-    int activeCount = 0;
+    ChannelSubscriberCounts counts;
     {
         std::lock_guard<std::mutex> lock(channelsMutex_);
         for (auto it = channels_.begin(); it != channels_.end(); ) {
@@ -320,12 +320,20 @@ int Sender::cleanupDisconnected() {
                 retiring.push_back(std::move(*it));
                 it = channels_.erase(it);
             } else {
+                if (c) {
+                    counts.total++;
+                    if (c->isVideoSubscribed()) counts.videoSubscribers++;
+                    if (c->isAudioSubscribed()) counts.audioSubscribers++;
+                }
                 ++it;
             }
         }
-        activeCount = static_cast<int>(channels_.size());
     }
-    return activeCount;
+    return counts;
+}
+
+int Sender::cleanupDisconnected() {
+    return cleanupAndCountSubscribers().total;
 }
 
 int Sender::connectionCount() const {
@@ -649,8 +657,9 @@ int Sender::encodeFrameLocked(const MediaFrame& frame, std::vector<uint8_t>& out
 }
 
 int Sender::send(const MediaFrame& frame) {
-    // Retire disconnected channels and test for subscribers in one lock pass.
-    if (cleanupDisconnected() == 0) return 1;  // No clients, but not an error
+    // Retire disconnected channels and count subscribers in one lock pass.
+    const auto subscriberCounts = cleanupAndCountSubscribers();
+    if (subscriberCounts.total == 0) return 1;  // No clients, but not an error
     
     // P0 #9: validate input before touching the encoder or VMX.
     if (!validateFrame(frame)) {
@@ -658,6 +667,10 @@ int Sender::send(const MediaFrame& frame) {
              frame.width, frame.height, frame.stride, frame.dataLength,
              frame.frameRateN, frame.frameRateD);
         return 0;
+    }
+
+    if (subscriberCounts.videoSubscribers == 0) {
+        return 1; // Clients connected, but none subscribed to video
     }
     
     // P0 #8: encoder-select + encode + payload-copy as ONE transaction under a
@@ -740,7 +753,8 @@ int Sender::sendAudio(const AudioFrame& frame) {
         return 0;
     if (frame.metadataLength && (!frame.metadata ||
         static_cast<const char*>(frame.metadata)[frame.metadataLength-1] != '\0')) return 0;
-    cleanupDisconnected();
+    const auto subscriberCounts = cleanupAndCountSubscribers();
+    if (subscriberCounts.audioSubscribers == 0) return 1;
     thread_local std::vector<uint8_t> payload;
     uint32_t active = 0;
     if (!encodeAudio(frame.data, frame.dataLength, frame.channels, frame.samplesPerChannel, payload, active))
