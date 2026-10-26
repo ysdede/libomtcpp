@@ -21,6 +21,21 @@ inline bool audioSize(int channels, int samples, size_t& bytes) {
 
 // Silence is an all-zero byte plane, matching libomtnet. Negative zero, NaN,
 // infinities and subnormal samples retain their original bit representation.
+inline bool isPlaneActive(const uint8_t* p, size_t plane) {
+    size_t i = 0;
+    for (; i + 8 <= plane; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, sizeof(w));
+        if (w != 0) return true;
+    }
+    for (; i + 4 <= plane; i += 4) {
+        uint32_t w;
+        std::memcpy(&w, p + i, sizeof(w));
+        if (w != 0) return true;
+    }
+    return false;
+}
+
 inline bool encodeAudio(const void* data, int length, int channels, int samples,
                         std::vector<uint8_t>& output, uint32_t& active) {
     size_t bytes=0;
@@ -28,11 +43,30 @@ inline bool encodeAudio(const void* data, int length, int channels, int samples,
        static_cast<size_t>(length)<bytes)return false;
     const size_t plane=static_cast<size_t>(samples)*4;
     const auto* input=static_cast<const uint8_t*>(data);
-    output.clear();output.reserve(bytes);active=0;
+
+    uint32_t activeMask = 0;
     for(int ch=0;ch<channels;++ch) {
-        const uint8_t* p=input+ch*plane;bool used=false;
-        for(size_t i=0;i<plane;++i)if(p[i]){used=true;break;}
-        if(used){active|=uint32_t{1}<<ch;output.insert(output.end(),p,p+plane);}
+        if (isPlaneActive(input + ch * plane, plane)) {
+            activeMask |= (uint32_t{1} << ch);
+        }
+    }
+    active = activeMask;
+
+    int activeCount = 0;
+    uint32_t temp = activeMask;
+    while (temp) {
+        activeCount += (temp & 1);
+        temp >>= 1;
+    }
+
+    const size_t activeBytes = static_cast<size_t>(activeCount) * plane;
+    output.resize(activeBytes);
+    uint8_t* dst = output.data();
+    for(int ch=0;ch<channels;++ch) {
+        if (activeMask & (uint32_t{1} << ch)) {
+            std::memcpy(dst, input + ch * plane, plane);
+            dst += plane;
+        }
     }
     return true;
 }
