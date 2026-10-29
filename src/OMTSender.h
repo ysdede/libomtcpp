@@ -317,8 +317,15 @@ private:
     void acceptLoop();
     
     // Add/remove channels
+    struct ChannelSubscriberCounts {
+        int total = 0;
+        int videoSubscribers = 0;
+        int audioSubscribers = 0;
+    };
+
     void addChannel(std::unique_ptr<Channel> channel);
     void removeChannel(Channel* channel);
+    ChannelSubscriberCounts cleanupAndCountSubscribers();
     int cleanupDisconnected();
     
     // Encoder management
