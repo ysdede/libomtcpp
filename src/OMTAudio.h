@@ -31,7 +31,15 @@ inline bool encodeAudio(const void* data, int length, int channels, int samples,
     output.clear();output.reserve(bytes);active=0;
     for(int ch=0;ch<channels;++ch) {
         const uint8_t* p=input+ch*plane;bool used=false;
-        for(size_t i=0;i<plane;++i)if(p[i]){used=true;break;}
+        const size_t words=plane/sizeof(uint64_t);
+        for(size_t i=0;i<words;++i){
+            uint64_t val;
+            std::memcpy(&val,p+i*sizeof(uint64_t),sizeof(uint64_t));
+            if(val){used=true;break;}
+        }
+        if(!used){
+            for(size_t j=words*sizeof(uint64_t);j<plane;++j)if(p[j]){used=true;break;}
+        }
         if(used){active|=uint32_t{1}<<ch;output.insert(output.end(),p,p+plane);}
     }
     return true;

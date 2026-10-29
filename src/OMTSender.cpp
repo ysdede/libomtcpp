@@ -754,7 +754,9 @@ int Sender::sendAudio(const AudioFrame& frame) {
     if (frame.metadataLength && (!frame.metadata ||
         static_cast<const char*>(frame.metadata)[frame.metadataLength-1] != '\0')) return 0;
     const auto subscriberCounts = cleanupAndCountSubscribers();
-    if (subscriberCounts.audioSubscribers == 0) return 1;
+    // Preserve the audio API's zero-byte result when there is no recipient,
+    // including malformed input that encodeAudio would have rejected.
+    if (subscriberCounts.audioSubscribers == 0) return 0;
     thread_local std::vector<uint8_t> payload;
     uint32_t active = 0;
     if (!encodeAudio(frame.data, frame.dataLength, frame.channels, frame.samplesPerChannel, payload, active))
