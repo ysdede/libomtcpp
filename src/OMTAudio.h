@@ -6,6 +6,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace omt {
 static_assert(sizeof(AudioExtHeader)==24, "FPA1 wire header is 24 bytes");
 static_assert(offsetof(AudioExtHeader,samplesPerChannel)==8 &&
@@ -52,14 +56,24 @@ inline bool decodeAudio(const AudioExtHeader& header, const uint8_t* data, size_
        !audioSize(header.channels,header.samplesPerChannel,bytes))return false;
     const uint32_t allowed=header.channels==32 ? UINT32_MAX : (uint32_t{1}<<header.channels)-1;
     if(header.activeChannels & ~allowed)return false;
+#if defined(__GNUG__) || defined(__clang__)
+    const unsigned count = static_cast<unsigned>(__builtin_popcount(header.activeChannels));
+#elif defined(_MSC_VER)
+    const unsigned count = static_cast<unsigned>(__popcnt(header.activeChannels));
+#else
     unsigned count=0;uint32_t bits=header.activeChannels;
     while(bits){count+=bits&1;bits>>=1;}
+#endif
     const size_t plane=static_cast<size_t>(header.samplesPerChannel)*4;
     if(length!=count*plane || (length && !data))return false;
-    output.assign(bytes,0);
+    if(output.size()!=bytes)output.resize(bytes);
     size_t offset=0;
-    for(int ch=0;ch<header.channels;++ch)if(header.activeChannels&(uint32_t{1}<<ch)){
-        std::memcpy(output.data()+ch*plane,data+offset,plane);offset+=plane;
+    for(int ch=0;ch<header.channels;++ch){
+        if(header.activeChannels&(uint32_t{1}<<ch)){
+            std::memcpy(output.data()+ch*plane,data+offset,plane);offset+=plane;
+        } else {
+            std::memset(output.data()+ch*plane,0,plane);
+        }
     }
     return true;
 }
